@@ -1,4 +1,5 @@
 import math
+from time import time
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -486,12 +487,12 @@ class Generator(torch.nn.Module):
         self.conv_pre = Conv1d(
             initial_channel, upsample_initial_channel, 7, 1, padding=3
         )
-        resblock = modules.ResBlock1 if resblock == "1" else modules.ResBlock2
+        # resblock = modules.ResBlock1 if resblock == "1" else modules.ResBlock2
 
         self.ups = nn.ModuleList()
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             self.ups.append(
-                weight_norm(
+                torch.nn.utils.weight_norm(
                     ConvTranspose1d(
                         upsample_initial_channel // (2**i),
                         upsample_initial_channel // (2 ** (i + 1)),
@@ -508,29 +509,85 @@ class Generator(torch.nn.Module):
             for j, (k, d) in enumerate(
                 zip(resblock_kernel_sizes, resblock_dilation_sizes)
             ):
-                self.resblocks.append(resblock(ch, k, d))
+                if resblock == "1":
+                    self.resblocks.append(modules.ResBlock1(ch, k, d))
+                else:
+                    self.resblocks.append(modules.ResBlock2(ch, k, d))
 
         self.conv_post = Conv1d(ch, 1, 7, 1, padding=3, bias=False)
-        self.ups.apply(init_weights)
+        # self.ups.apply(init_weights)
 
         if gin_channels != 0:
             self.cond = nn.Conv1d(gin_channels, upsample_initial_channel, 1)
+
+    # from https://github.com/pytorch/pytorch/issues/57289#issuecomment-1561331140
+    def __prepare_scriptable__(self):
+        for up in self.ups:
+            for hook in up._forward_pre_hooks.values():
+                # The hook we want to remove is an instance of WeightNorm class, so
+                # normally we would do `if isinstance(...)` but this class is not accessible
+                # because of shadowing, so we check the module name directly.
+                # https://github.com/pytorch/pytorch/blob/be0ca00c5ce260eb5bcec3237357f7a30cc08983/torch/nn/utils/__init__.py#L3
+                if (
+                    hook.__module__ == "torch.nn.utils.weight_norm"
+                    and hook.__class__.__name__ == "WeightNorm"
+                ):
+                    torch.nn.utils.remove_weight_norm(up)
+        for resblock in self.resblocks:
+            if isinstance(resblock, modules.ResBlock1):
+                for conv in resblock.convs1:
+                    for hook in conv._forward_pre_hooks.values():
+                        if (
+                            hook.__module__ == "torch.nn.utils.weight_norm"
+                            and hook.__class__.__name__ == "WeightNorm"
+                        ):
+                            torch.nn.utils.remove_weight_norm(conv)
+                for conv in resblock.convs2:
+                    for hook in conv._forward_pre_hooks.values():
+                        if (
+                            hook.__module__ == "torch.nn.utils.weight_norm"
+                            and hook.__class__.__name__ == "WeightNorm"
+                        ):
+                            torch.nn.utils.remove_weight_norm(conv)
+            elif isinstance(resblock, modules.ResBlock2):
+                for conv in resblock.convs:
+                    for hook in conv._forward_pre_hooks.values():
+                        if (
+                            hook.__module__ == "torch.nn.utils.weight_norm"
+                            and hook.__class__.__name__ == "WeightNorm"
+                        ):
+                            torch.nn.utils.remove_weight_norm(conv)
+        return self
 
     def forward(self, x, g=None):
         x = self.conv_pre(x)
         if g is not None:
             x = x + self.cond(g)
+        LRELU_SLOPE = 0.1
+        # for i in range(self.num_upsamples):
+        #     x = F.leaky_relu(x, LRELU_SLOPE)
+        #     x = self.ups[i](x)
+        #     xs = None
+        #     for j in range(self.num_kernels):
+        #         if xs is None:
+        #             xs = self.resblocks[i * self.num_kernels + j](x)
+        #         else:
+        #             xs += self.resblocks[i * self.num_kernels + j](x)
+        #     x = xs / self.num_kernels
 
         for i in range(self.num_upsamples):
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
-            x = self.ups[i](x)
-            xs = None
+            x = F.leaky_relu(x, LRELU_SLOPE)
+
+            for j, up in enumerate(self.ups):
+                if j == i:
+                    x = up(x)
+            xs = torch.zeros_like(x)
             for j in range(self.num_kernels):
-                if xs is None:
-                    xs = self.resblocks[i * self.num_kernels + j](x)
-                else:
-                    xs += self.resblocks[i * self.num_kernels + j](x)
+                for k, resblock in enumerate(self.resblocks):
+                    if i * self.num_kernels + j == k:
+                        xs += resblock(x)
             x = xs / self.num_kernels
+
         x = F.leaky_relu(x)
         x = self.conv_post(x)
         x = torch.tanh(x)
@@ -613,9 +670,10 @@ class DiscriminatorP(torch.nn.Module):
             t = t + n_pad
         x = x.view(b, c, t // self.period, self.period)
 
+        LRELU_SLOPE = 0.1
         for layer in self.convs:
             x = layer(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
+            x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
         x = self.conv_post(x)
         fmap.append(x)
@@ -642,10 +700,11 @@ class DiscriminatorS(torch.nn.Module):
 
     def forward(self, x):
         fmap = []
+        LRELU_SLOPE = 0.1
 
         for layer in self.convs:
             x = layer(x)
-            x = F.leaky_relu(x, modules.LRELU_SLOPE)
+            x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
         x = self.conv_post(x)
         fmap.append(x)
@@ -717,7 +776,7 @@ class ReferenceEncoder(nn.Module):
         self.proj = nn.Linear(128, gin_channels)
         if layernorm:
             self.layernorm = nn.LayerNorm(self.spec_channels)
-            print('[Ref Enc]: using layer norm')
+            print("[Ref Enc]: using layer norm")
         else:
             self.layernorm = None
 
@@ -783,7 +842,7 @@ class SynthesizerTrn(nn.Module):
         num_languages=None,
         num_tones=None,
         norm_refenc=False,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
         self.n_vocab = n_vocab
@@ -830,6 +889,7 @@ class SynthesizerTrn(nn.Module):
             num_languages=num_languages,
             num_tones=num_tones,
         )
+        # self.enc_p = torch.jit.script(self.enc_p)
         self.dec = Generator(
             inter_channels,
             resblock,
@@ -840,6 +900,7 @@ class SynthesizerTrn(nn.Module):
             upsample_kernel_sizes,
             gin_channels=gin_channels,
         )
+        # self.dec = torch.jit.script(self.dec)
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -881,9 +942,10 @@ class SynthesizerTrn(nn.Module):
         if n_speakers > 0:
             self.emb_g = nn.Embedding(n_speakers, gin_channels)
         else:
-            self.ref_enc = ReferenceEncoder(spec_channels, gin_channels, layernorm=norm_refenc)
+            self.ref_enc = ReferenceEncoder(
+                spec_channels, gin_channels, layernorm=norm_refenc
+            )
         self.use_vc = use_vc
-
 
     def forward(self, x, x_lengths, y, y_lengths, sid, tone, language, bert, ja_bert):
         if self.n_speakers > 0:
@@ -982,6 +1044,7 @@ class SynthesizerTrn(nn.Module):
     ):
         # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
         # g = self.gst(y)
+        s = time()
         if g is None:
             if self.n_speakers > 0:
                 g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
@@ -991,17 +1054,23 @@ class SynthesizerTrn(nn.Module):
             g_p = None
         else:
             g_p = g
+        print("ref enc or emb_g time:", time() - s)
+        s = time()
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, bert, ja_bert, g=g_p
         )
+        print("enc_p time:", time() - s)
+        s = time()
         logw = self.sdp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w) * (
             sdp_ratio
         ) + self.dp(x, x_mask, g=g) * (1 - sdp_ratio)
+        print("sdp and dp time:", time() - s)
+        s = time()
         w = torch.exp(logw) * x_mask * length_scale
-        
+
         w_ceil = torch.ceil(w)
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
-        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, None), 1).to(
+        y_mask = torch.unsqueeze(commons.sequence_mask(y_lengths, 0), 1).to(
             x_mask.dtype
         )
         attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
@@ -1015,12 +1084,22 @@ class SynthesizerTrn(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
+        print("ops time:", time() - s)
+        s = time()
         z = self.flow(z_p, y_mask, g=g, reverse=True)
+        print("flow time:", time() - s)
+        print(
+            f"x_in shape: {(z * y_mask)[:, :, :max_len].shape}, g_in shape: {g.shape}"
+        )
+        s = time()
         o = self.dec((z * y_mask)[:, :, :max_len], g=g)
+        print("dec time:", time() - s)
+        print(f"o shape: {o.shape}")
+        s = time()
         # print('max/min of o:', o.max(), o.min())
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
-    def voice_conversion(self, y, y_lengths, sid_src, sid_tgt, tau=1.0):        
+    def voice_conversion(self, y, y_lengths, sid_src, sid_tgt, tau=1.0):
         g_src = sid_src
         g_tgt = sid_tgt
         z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g_src, tau=tau)

@@ -73,7 +73,7 @@ class Encoder(nn.Module):
         self.ffn_layers = nn.ModuleList()
         self.norm_layers_2 = nn.ModuleList()
 
-        for i in range(self.n_layers):
+        for _ in range(self.n_layers):
             self.attn_layers.append(
                 MultiHeadAttention(
                     hidden_channels,
@@ -98,19 +98,36 @@ class Encoder(nn.Module):
     def forward(self, x, x_mask, g=None):
         attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
         x = x * x_mask
-        for i in range(self.n_layers):
+        # for i in range(self.n_layers):
+        #     if i == self.cond_layer_idx and g is not None:
+        #         g = self.spk_emb_linear(g.transpose(1, 2))
+        #         g = g.transpose(1, 2)
+        #         x = x + g
+        #         x = x * x_mask
+        #     y = self.attn_layers[i](x, x, attn_mask)
+        #     y = self.drop(y)
+        #     x = self.norm_layers_1[i](x + y)
+
+        #     y = self.ffn_layers[i](x, x_mask)
+        #     y = self.drop(y)
+        #     x = self.norm_layers_2[i](x + y)
+        i = 0
+        for attn_layer, norm_layer_1, ffn_layer, norm_layer_2 in zip(
+            self.attn_layers, self.norm_layers_1, self.ffn_layers, self.norm_layers_2
+        ):
             if i == self.cond_layer_idx and g is not None:
                 g = self.spk_emb_linear(g.transpose(1, 2))
                 g = g.transpose(1, 2)
                 x = x + g
                 x = x * x_mask
-            y = self.attn_layers[i](x, x, attn_mask)
+            y = attn_layer(x, x, attn_mask)
             y = self.drop(y)
-            x = self.norm_layers_1[i](x + y)
+            x = norm_layer_1(x + y)
 
-            y = self.ffn_layers[i](x, x_mask)
+            y = ffn_layer(x, x_mask)
             y = self.drop(y)
-            x = self.norm_layers_2[i](x + y)
+            x = norm_layer_2(x + y)
+            i += 1
         x = x * x_mask
         return x
 
@@ -145,7 +162,7 @@ class Decoder(nn.Module):
         self.norm_layers_1 = nn.ModuleList()
         self.ffn_layers = nn.ModuleList()
         self.norm_layers_2 = nn.ModuleList()
-        for i in range(self.n_layers):
+        for _ in range(self.n_layers):
             self.self_attn_layers.append(
                 MultiHeadAttention(
                     hidden_channels,
@@ -226,7 +243,7 @@ class MultiHeadAttention(nn.Module):
         self.block_length = block_length
         self.proximal_bias = proximal_bias
         self.proximal_init = proximal_init
-        self.attn = None
+        self.attn = torch.tensor(0)
 
         self.k_channels = channels // n_heads
         self.conv_q = nn.Conv1d(channels, channels, 1)
@@ -255,19 +272,25 @@ class MultiHeadAttention(nn.Module):
                 self.conv_k.weight.copy_(self.conv_q.weight)
                 self.conv_k.bias.copy_(self.conv_q.bias)
 
-    def forward(self, x, c, attn_mask=None):
+    def forward(self, x, c, attn_mask):
         q = self.conv_q(x)
         k = self.conv_k(c)
         v = self.conv_v(c)
 
-        x, self.attn = self.attention(q, k, v, mask=attn_mask)
+        out = self.attention(q, k, v, mask=attn_mask)
+        x = out[0]
+        self.attn = out[1]
 
         x = self.conv_o(x)
         return x
 
-    def attention(self, query, key, value, mask=None):
+    def attention(self, query, key, value, mask: torch.Tensor = torch.tensor(0)):
         # reshape [b, d, t] -> [b, n_h, t, d_k]
-        b, d, t_s, t_t = (*key.size(), query.size(2))
+        # b, d, t_s, t_t = (*key.size(), query.size(2))
+        b = key.size(0)
+        d = key.size(1)
+        t_s = key.size(2)
+        t_t = query.size(2)
         query = query.view(b, self.n_heads, self.k_channels, t_t).transpose(2, 3)
         key = key.view(b, self.n_heads, self.k_channels, t_s).transpose(2, 3)
         value = value.view(b, self.n_heads, self.k_channels, t_s).transpose(2, 3)
@@ -288,7 +311,7 @@ class MultiHeadAttention(nn.Module):
             scores = scores + self._attention_bias_proximal(t_s).to(
                 device=scores.device, dtype=scores.dtype
             )
-        if mask is not None:
+        if torch.any(mask):
             scores = scores.masked_fill(mask == 0, -1e4)
             if self.block_length is not None:
                 assert (
@@ -334,16 +357,19 @@ class MultiHeadAttention(nn.Module):
         ret = torch.matmul(x, y.unsqueeze(0).transpose(-2, -1))
         return ret
 
-    def _get_relative_embeddings(self, relative_embeddings, length):
+    def _get_relative_embeddings(self, relative_embeddings, length: int):
         2 * self.window_size + 1
         # Pad first before slice to avoid using cond ops.
         pad_length = max(length - (self.window_size + 1), 0)
         slice_start_position = max((self.window_size + 1) - length, 0)
         slice_end_position = slice_start_position + 2 * length - 1
         if pad_length > 0:
+            # padded_relative_embeddings = F.pad(
+            #     relative_embeddings,
+            #     commons.convert_pad_shape([[0, 0], [pad_length, pad_length], [0, 0]]),
+            # )
             padded_relative_embeddings = F.pad(
-                relative_embeddings,
-                commons.convert_pad_shape([[0, 0], [pad_length, pad_length], [0, 0]]),
+                relative_embeddings, [0, 0, pad_length, pad_length, 0, 0]
             )
         else:
             padded_relative_embeddings = relative_embeddings
@@ -359,12 +385,15 @@ class MultiHeadAttention(nn.Module):
         """
         batch, heads, length, _ = x.size()
         # Concat columns of pad to shift from relative to absolute indexing.
-        x = F.pad(x, commons.convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, 1]]))
+        # x = F.pad(x, commons.convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, 1]]))
+        x = F.pad(x, [0, 1, 0, 0, 0, 0, 0, 0])
 
         # Concat extra elements so to add up to shape (len+1, 2*len-1).
         x_flat = x.view([batch, heads, length * 2 * length])
         x_flat = F.pad(
-            x_flat, commons.convert_pad_shape([[0, 0], [0, 0], [0, length - 1]])
+            # x_flat, commons.convert_pad_shape([[0, 0], [0, 0], [0, length - 1]])
+            x_flat,
+            [0, length - 1, 0, 0, 0, 0],
         )
 
         # Reshape and slice out the padded elements.
@@ -380,16 +409,20 @@ class MultiHeadAttention(nn.Module):
         """
         batch, heads, length, _ = x.size()
         # pad along column
-        x = F.pad(
-            x, commons.convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, length - 1]])
+        # x = F.pad(
+        #     x, commons.convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, length - 1]])
+        # )
+        x = F.pad(x, [0, length - 1, 0, 0, 0, 0, 0, 0])
+        x_flat = x.view(
+            [int(batch), int(heads), int(length**2 + length * (length - 1))]
         )
-        x_flat = x.view([batch, heads, length**2 + length * (length - 1)])
         # add 0's in the beginning that will skew the elements after reshape
-        x_flat = F.pad(x_flat, commons.convert_pad_shape([[0, 0], [0, 0], [length, 0]]))
-        x_final = x_flat.view([batch, heads, length, 2 * length])[:, :, :, 1:]
+        # x_flat = F.pad(x_flat, commons.convert_pad_shape([[0, 0], [0, 0], [length, 0]]))
+        x_flat = F.pad(x_flat, [length, 0, 0, 0, 0, 0])
+        x_final = x_flat.view([batch, heads, length, int(2 * length)])[:, :, :, 1:]
         return x_final
 
-    def _attention_bias_proximal(self, length):
+    def _attention_bias_proximal(self, length: int):
         """Bias for self-attention to encourage attention to close positions.
         Args:
           length: an integer scalar.
@@ -409,7 +442,7 @@ class FFN(nn.Module):
         filter_channels,
         kernel_size,
         p_dropout=0.0,
-        activation=None,
+        # activation=None,
         causal=False,
     ):
         super().__init__()
@@ -418,7 +451,7 @@ class FFN(nn.Module):
         self.filter_channels = filter_channels
         self.kernel_size = kernel_size
         self.p_dropout = p_dropout
-        self.activation = activation
+        # self.activation = activation
         self.causal = causal
 
         if causal:
@@ -431,13 +464,28 @@ class FFN(nn.Module):
         self.drop = nn.Dropout(p_dropout)
 
     def forward(self, x, x_mask):
-        x = self.conv_1(self.padding(x * x_mask))
-        if self.activation == "gelu":
-            x = x * torch.sigmoid(1.702 * x)
+        # x = self.conv_1(self.padding(x * x_mask))
+        if self.causal:
+            x = self._causal_padding(x * x_mask)
         else:
-            x = torch.relu(x)
+            x = self._same_padding(x * x_mask)
+        x = self.conv_1(x)
+
+        # if self.activation == "gelu":
+        #     x = x * torch.sigmoid(1.702 * x)
+        # else:
+        # x = torch.relu(x)
+
+        x = torch.relu(x)
         x = self.drop(x)
-        x = self.conv_2(self.padding(x * x_mask))
+
+        # x = self.conv_2(self.padding(x * x_mask))
+
+        if self.causal:
+            x = self._causal_padding(x * x_mask)
+        else:
+            x = self._same_padding(x * x_mask)
+        x = self.conv_2(x)
         return x * x_mask
 
     def _causal_padding(self, x):
@@ -445,8 +493,10 @@ class FFN(nn.Module):
             return x
         pad_l = self.kernel_size - 1
         pad_r = 0
-        padding = [[0, 0], [0, 0], [pad_l, pad_r]]
-        x = F.pad(x, commons.convert_pad_shape(padding))
+        # padding = [[0, 0], [0, 0], [pad_l, pad_r]]
+        padding = [pad_l, pad_r, 0, 0, 0, 0]
+        # x = F.pad(x, commons.convert_pad_shape(padding))
+        x = F.pad(x, padding)
         return x
 
     def _same_padding(self, x):
@@ -454,6 +504,8 @@ class FFN(nn.Module):
             return x
         pad_l = (self.kernel_size - 1) // 2
         pad_r = self.kernel_size // 2
-        padding = [[0, 0], [0, 0], [pad_l, pad_r]]
-        x = F.pad(x, commons.convert_pad_shape(padding))
+        # padding = [[0, 0], [0, 0], [pad_l, pad_r]]
+        padding = [pad_l, pad_r, 0, 0, 0, 0]
+        # x = F.pad(x, commons.convert_pad_shape(padding))
+        x = F.pad(x, padding)
         return x

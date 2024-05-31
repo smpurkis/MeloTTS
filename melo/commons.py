@@ -3,20 +3,20 @@ import torch
 from torch.nn import functional as F
 
 
-def init_weights(m, mean=0.0, std=0.01):
+def init_weights(m, mean: float = 0.0, std: float = 0.01):
     classname = m.__class__.__name__
     if classname.find("Conv") != -1:
         m.weight.data.normal_(mean, std)
 
 
-def get_padding(kernel_size, dilation=1):
+def get_padding(kernel_size, dilation: int = 1):
     return int((kernel_size * dilation - dilation) / 2)
 
 
-def convert_pad_shape(pad_shape):
-    layer = pad_shape[::-1]
-    pad_shape = [item for sublist in layer for item in sublist]
-    return pad_shape
+# def convert_pad_shape(pad_shape):
+#     layer = pad_shape[::-1]
+#     pad_shape = [item for sublist in layer for item in sublist]
+#     return pad_shape
 
 
 def intersperse(lst, item):
@@ -107,19 +107,20 @@ def fused_add_tanh_sigmoid_multiply(input_a, input_b, n_channels):
     return acts
 
 
-def convert_pad_shape(pad_shape):
-    layer = pad_shape[::-1]
-    pad_shape = [item for sublist in layer for item in sublist]
-    return pad_shape
+# def convert_pad_shape(pad_shape):
+#     layer = pad_shape[::-1]
+#     pad_shape = [item for sublist in layer for item in sublist]
+#     return pad_shape
 
 
 def shift_1d(x):
-    x = F.pad(x, convert_pad_shape([[0, 0], [0, 0], [1, 0]]))[:, :, :-1]
+    # x = F.pad(x, convert_pad_shape([[0, 0], [0, 0], [1, 0]]))[:, :, :-1]
+    x = F.pad(x, [1, 0, 0, 0, 0, 0])[:, :, :-1]
     return x
 
 
-def sequence_mask(length, max_length=None):
-    if max_length is None:
+def sequence_mask(length, max_length: int = 0):
+    if max_length == 0:
         max_length = length.max()
     x = torch.arange(max_length, dtype=length.dtype, device=length.device)
     return x.unsqueeze(0) < length.unsqueeze(1)
@@ -137,12 +138,13 @@ def generate_path(duration, mask):
     cum_duration_flat = cum_duration.view(b * t_x)
     path = sequence_mask(cum_duration_flat, t_y).to(mask.dtype)
     path = path.view(b, t_x, t_y)
-    path = path - F.pad(path, convert_pad_shape([[0, 0], [1, 0], [0, 0]]))[:, :-1]
+    # path = path - F.pad(path, convert_pad_shape([[0, 0], [1, 0], [0, 0]]))[:, :-1]
+    path = path - F.pad(path, [0, 0, 1, 0, 0, 0])[:, :-1]
     path = path.unsqueeze(1).transpose(2, 3) * mask
     return path
 
 
-def clip_grad_value_(parameters, clip_value, norm_type=2):
+def clip_grad_value_(parameters, clip_value, norm_type: int = 2):
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
     parameters = list(filter(lambda p: p.grad is not None, parameters))
