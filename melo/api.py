@@ -14,7 +14,13 @@ from .download_utils import load_or_download_config, load_or_download_model
 
 class TTS(nn.Module):
     def __init__(
-        self, language, device="auto", use_hf=True, config_path=None, ckpt_path=None
+        self,
+        language,
+        device="auto",
+        use_hf=True,
+        config_path=None,
+        ckpt_path=None,
+        use_onnx: bool = False,
     ):
         super().__init__()
         if device == "auto":
@@ -40,6 +46,7 @@ class TTS(nn.Module):
             n_speakers=hps.data.n_speakers,
             num_tones=num_tones,
             num_languages=num_languages,
+            use_onnx=use_onnx,
             **hps.model,
         ).to(device)
 
@@ -93,7 +100,16 @@ class TTS(nn.Module):
         quiet=False,
     ):
         language = self.language
-        texts = self.split_sentences_into_pieces(text, language, quiet)
+        # texts = self.split_sentences_into_pieces(text, language, quiet)
+        texts = []
+        # split on each sentence ending in ., !, or ?
+        for sentence in re.split(r"([.!?])", text):
+            if sentence:
+                if sentence in [".", "!", "?"]:
+                    texts[-1] += sentence
+                else:
+                    texts.append(sentence.strip())
+
         audio_list = []
         if pbar:
             tx = pbar(texts)

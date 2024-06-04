@@ -14,6 +14,8 @@ from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 from melo.commons import init_weights, get_padding
 import melo.monotonic_align as monotonic_align
 
+import onnxruntime as ort
+
 
 class DurationDiscriminator(nn.Module):  # vits2
     def __init__(
@@ -520,6 +522,56 @@ class Generator(torch.nn.Module):
         if gin_channels != 0:
             self.cond = nn.Conv1d(gin_channels, upsample_initial_channel, 1)
 
+    def forward(self, x, g=None):
+        x = self.conv_pre(x)
+        if g is not None:
+            x = x + self.cond(g)
+        LRELU_SLOPE = 0.1
+        # for i in range(self.num_upsamples):
+        #     x = F.leaky_relu(x, LRELU_SLOPE)
+        #     x = self.ups[i](x)
+        #     xs = None
+        #     for j in range(self.num_kernels):
+        #         if xs is None:
+        #             xs = self.resblocks[i * self.num_kernels + j](x)
+        #         else:
+        #             xs += self.resblocks[i * self.num_kernels + j](x)
+        #     x = xs / self.num_kernels
+
+        for i in range(self.num_upsamples):
+            x = F.leaky_relu(x, LRELU_SLOPE)
+
+            for j, up in enumerate(self.ups):
+                if j == i:
+
+                    # s = time()
+                    x = up(x)
+                    # print(f"up {i}: {time() - s:.2f}s")
+            xs = torch.zeros_like(x)
+            for j in range(self.num_kernels):
+                for k, resblock in enumerate(self.resblocks):
+                    if i * self.num_kernels + j == k:
+                        # s = time()
+                        xs += resblock(x)
+                        # print(f"resblock {type(resblock)} {k}: {time() - s:.2f}s")
+            x = xs / self.num_kernels
+            # print(x.shape)
+        x = F.leaky_relu(x)
+
+        x = self.conv_post(x)
+
+        # print(x.shape)
+        x = torch.tanh(x)
+
+        return x
+
+    def remove_weight_norm(self):
+        print("Removing weight norm...")
+        for layer in self.ups:
+            remove_weight_norm(layer)
+        for layer in self.resblocks:
+            layer.remove_weight_norm()
+
     # from https://github.com/pytorch/pytorch/issues/57289#issuecomment-1561331140
     def __prepare_scriptable__(self):
         for up in self.ups:
@@ -558,48 +610,6 @@ class Generator(torch.nn.Module):
                         ):
                             torch.nn.utils.remove_weight_norm(conv)
         return self
-
-    def forward(self, x, g=None):
-        x = self.conv_pre(x)
-        if g is not None:
-            x = x + self.cond(g)
-        LRELU_SLOPE = 0.1
-        # for i in range(self.num_upsamples):
-        #     x = F.leaky_relu(x, LRELU_SLOPE)
-        #     x = self.ups[i](x)
-        #     xs = None
-        #     for j in range(self.num_kernels):
-        #         if xs is None:
-        #             xs = self.resblocks[i * self.num_kernels + j](x)
-        #         else:
-        #             xs += self.resblocks[i * self.num_kernels + j](x)
-        #     x = xs / self.num_kernels
-
-        for i in range(self.num_upsamples):
-            x = F.leaky_relu(x, LRELU_SLOPE)
-
-            for j, up in enumerate(self.ups):
-                if j == i:
-                    x = up(x)
-            xs = torch.zeros_like(x)
-            for j in range(self.num_kernels):
-                for k, resblock in enumerate(self.resblocks):
-                    if i * self.num_kernels + j == k:
-                        xs += resblock(x)
-            x = xs / self.num_kernels
-
-        x = F.leaky_relu(x)
-        x = self.conv_post(x)
-        x = torch.tanh(x)
-
-        return x
-
-    def remove_weight_norm(self):
-        print("Removing weight norm...")
-        for layer in self.ups:
-            remove_weight_norm(layer)
-        for layer in self.resblocks:
-            layer.remove_weight_norm()
 
 
 class DiscriminatorP(torch.nn.Module):
@@ -842,6 +852,7 @@ class SynthesizerTrn(nn.Module):
         num_languages=None,
         num_tones=None,
         norm_refenc=False,
+        use_onnx: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -872,6 +883,7 @@ class SynthesizerTrn(nn.Module):
         self.mas_noise_scale_initial = kwargs.get("mas_noise_scale_initial", 0.01)
         self.noise_scale_delta = kwargs.get("noise_scale_delta", 2e-6)
         self.current_mas_noise_scale = self.mas_noise_scale_initial
+        self.use_onnx = use_onnx
         if self.use_spk_conditioned_encoder and gin_channels > 0:
             self.enc_gin_channels = gin_channels
         else:
@@ -899,6 +911,10 @@ class SynthesizerTrn(nn.Module):
             upsample_initial_channel,
             upsample_kernel_sizes,
             gin_channels=gin_channels,
+        )
+
+        self.dec_onnx = ort.InferenceSession(
+            "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
         )
         # self.dec = torch.jit.script(self.dec)
         self.enc_q = PosteriorEncoder(
@@ -1054,17 +1070,17 @@ class SynthesizerTrn(nn.Module):
             g_p = None
         else:
             g_p = g
-        print("ref enc or emb_g time:", time() - s)
+        # print("ref enc or emb_g time:", time() - s)
         s = time()
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, bert, ja_bert, g=g_p
         )
-        print("enc_p time:", time() - s)
+        # print("enc_p time:", time() - s)
         s = time()
         logw = self.sdp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w) * (
             sdp_ratio
         ) + self.dp(x, x_mask, g=g) * (1 - sdp_ratio)
-        print("sdp and dp time:", time() - s)
+        # print("sdp and dp time:", time() - s)
         s = time()
         w = torch.exp(logw) * x_mask * length_scale
 
@@ -1084,17 +1100,23 @@ class SynthesizerTrn(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        print("ops time:", time() - s)
+        # print("ops time:", time() - s)
         s = time()
         z = self.flow(z_p, y_mask, g=g, reverse=True)
-        print("flow time:", time() - s)
-        print(
-            f"x_in shape: {(z * y_mask)[:, :, :max_len].shape}, g_in shape: {g.shape}"
-        )
+        # print("flow time:", time() - s)
+        # print(
+        #     f"x_in shape: {(z * y_mask)[:, :, :max_len].shape}, g_in shape: {g.shape}"
+        # )
         s = time()
-        o = self.dec((z * y_mask)[:, :, :max_len], g=g)
+        if self.use_onnx:
+            print("Using onnx")
+            x = (z * y_mask)[:, :, :max_len]
+            o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
+            o = torch.tensor(o)
+        else:
+            o = self.dec((z * y_mask)[:, :, :max_len], g=g)
         print("dec time:", time() - s)
-        print(f"o shape: {o.shape}")
+        # print(f"o shape: {o.shape}")
         s = time()
         # print('max/min of o:', o.max(), o.min())
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
