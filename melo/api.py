@@ -101,14 +101,15 @@ class TTS(nn.Module):
     ):
         language = self.language
         # texts = self.split_sentences_into_pieces(text, language, quiet)
-        texts = []
+        # texts = []
         # split on each sentence ending in ., !, or ?
-        for sentence in re.split(r"([.!?])", text):
-            if sentence:
-                if sentence in [".", "!", "?"]:
-                    texts[-1] += sentence
-                else:
-                    texts.append(sentence.strip())
+        # for sentence in re.split(r"([.!?])", text):
+        #     if sentence:
+        #         if sentence in [".", "!", "?"]:
+        #             texts[-1] += sentence
+        #         else:
+        #             texts.append(sentence.strip())
+        texts = [text]
 
         audio_list = []
         if pbar:

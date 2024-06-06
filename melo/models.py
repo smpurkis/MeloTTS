@@ -901,7 +901,6 @@ class SynthesizerTrn(nn.Module):
             num_languages=num_languages,
             num_tones=num_tones,
         )
-        # self.enc_p = torch.jit.script(self.enc_p)
         self.dec = Generator(
             inter_channels,
             resblock,
@@ -913,10 +912,9 @@ class SynthesizerTrn(nn.Module):
             gin_channels=gin_channels,
         )
 
-        self.dec_onnx = ort.InferenceSession(
-            "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
-        )
-        # self.dec = torch.jit.script(self.dec)
+        # self.dec_onnx = ort.InferenceSession(
+        #     "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
+        # )
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -1110,11 +1108,31 @@ class SynthesizerTrn(nn.Module):
         s = time()
         if self.use_onnx:
             print("Using onnx")
-            x = (z * y_mask)[:, :, :max_len]
-            o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
-            o = torch.tensor(o)
+            # x = (z * y_mask)[:, :, :max_len]
+            # o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
+            # o = torch.tensor(o)
         else:
-            o = self.dec((z * y_mask)[:, :, :max_len], g=g)
+            x = (z * y_mask)[:, :, :max_len]
+            o = self.dec(x, g=g)
+            import numpy as np
+
+            x_in = x.numpy()
+            x_in_hash = hash(x_in.data.tobytes())
+            x_in_path = f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data/x_in_{x_in_hash}.npy"
+            np.save( x_in_path, x_in)
+
+            g_in = g.numpy()
+            g_in_hash = hash(g_in.data.tobytes())
+            g_in_path = f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data/g_in_{g_in_hash}.npy"
+            np.save( g_in_path, g_in)
+
+            o_out = o.numpy()
+            o_out_hash = hash(o_out.data.tobytes())
+            o_out_path = f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data/o_out_{o_out_hash}.npy"
+            np.save( o_out_path, o_out)
+            self.dec_training[-1].update(
+                {"x_in_path": x_in_path, "g_in_path": g_in_path, "o_out_path": o_out_path}
+            )
         print("dec time:", time() - s)
         # print(f"o shape: {o.shape}")
         s = time()
