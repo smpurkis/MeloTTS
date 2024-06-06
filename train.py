@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 import shutil
 from time import time
 
@@ -8,6 +9,7 @@ from melo.models import Generator
 import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
+import wandb
 
 # Speed is adjustable
 speed = 1.0
@@ -31,7 +33,7 @@ model.model.dec_training = []
 # model.tts_to_file("blah", speaker_ids["EN-US"], output_path, speed=speed)
 
 
-distilled_generator = Generator(
+generator_params = dict(
     initial_channel=192,  # 192
     resblock="1",  # 1
     resblock_kernel_sizes=[
@@ -48,7 +50,9 @@ distilled_generator = Generator(
     upsample_initial_channel=512,  # 512
     upsample_kernel_sizes=[4, 8, 16, 4, 4],  # [16, 16, 8, 2, 2]
     gin_channels=256,  # 256
-).eval()
+)
+
+distilled_generator = Generator(**generator_params).eval()
 
 total_params_dec = sum(p.numel() for p in model.model.dec.parameters())
 total_params_dec_distilled = sum(p.numel() for p in distilled_generator.parameters())
@@ -83,14 +87,43 @@ assert out.shape == out_distilled.shape, f"{out.shape} != {out_distilled.shape}"
 
 # training
 
-epochs = 10
+# split the data into training and evaluation
+# np random seed
+np.random.seed(0)
+np.random.shuffle(texts)
 
-batch_size = 10
-texts = texts[:1000]
+evaluation_split = 0.1
+
+training_texts = texts[: int(len(texts) * (1 - evaluation_split))]
+evaluation_texts = texts[int(len(texts) * (1 - evaluation_split) + 1) :]
 
 training = True
 
-optimizer = torch.optim.Adam(distilled_generator.parameters(), lr=1e-4)
+lr = 1e-3
+
+optimizer = torch.optim.Adam(distilled_generator.parameters(), lr=lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3_000, gamma=0.1)
+
+epochs = 10
+batch_size = 32
+
+wandb.init(
+    # set the wandb project where this run will be logged
+    project="MeloTTS decoder-generator distillation",
+    # track hyperparameters and run metadata
+    config={
+        "learning_rate": lr,
+        "architecture": "Generator",
+        "dataset": "web-bible",
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "evaluation_split": evaluation_split,
+        "speed": speed,
+        "model_hyperparameters": generator_params,
+        "model_size_ratio": total_params_dec_distilled / total_params_dec,
+        "model_time_ratio": total_time_distilled / total_time,
+    },
+)
 
 for epoch in range(epochs):
     print(f"Epoch {epoch + 1}/{epochs}")
@@ -111,7 +144,10 @@ for epoch in range(epochs):
             desc=f"Batch generate {'training' if training else 'evaluation'}",
             leave=False,
         ):
-            text = texts[step * batch_size + i]
+            if training:
+                text = training_texts[step * batch_size + i]
+            else:
+                text = evaluation_texts[step * batch_size + i]
 
             model.model.dec_training.append({"text": text})
             model.tts_to_file(
@@ -160,13 +196,32 @@ for epoch in range(epochs):
             if training:
                 loss.backward()  # backpropagation
             batch_loss += loss.item()
+        batch_loss /= len(batch)
 
         if training:
-            optimizer.step()  # does the update
+            scheduler.step()
 
         print(
             f"{'Training' if training else 'Evaluation'} Batch Loss: {batch_loss / len(batch)}"
         )
+
+        # wandb log epoch, step, evaluation/training losses
+        if training:
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "step": step,
+                    "loss": batch_loss,
+                }
+            )
+        else:
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "step": step,
+                    "evaluation_loss": batch_loss,
+                }
+            )
 
     # save model
     print("Saving model...")
