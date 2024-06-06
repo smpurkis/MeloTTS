@@ -912,9 +912,10 @@ class SynthesizerTrn(nn.Module):
             gin_channels=gin_channels,
         )
 
-        # self.dec_onnx = ort.InferenceSession(
-        #     "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
-        # )
+        if self.use_onnx:
+            self.dec_onnx = ort.InferenceSession(
+                "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
+            )
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -1119,17 +1120,17 @@ class SynthesizerTrn(nn.Module):
 
             x_in = x.numpy()
             x_in_hash = hash(x_in.data.tobytes())
-            x_in_path = f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data/x_in_{x_in_hash}.npy"
+            x_in_path = f"dec_distill/data/x_in_{x_in_hash}.npy"
             np.save(x_in_path, x_in)
 
             g_in = g.numpy()
             g_in_hash = hash(g_in.data.tobytes())
-            g_in_path = f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data/g_in_{g_in_hash}.npy"
+            g_in_path = f"dec_distill/data/g_in_{g_in_hash}.npy"
             np.save(g_in_path, g_in)
 
             o_out = o.numpy()
             o_out_hash = hash(o_out.data.tobytes())
-            o_out_path = f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data/o_out_{o_out_hash}.npy"
+            o_out_path = f"dec_distill/data/o_out_{o_out_hash}.npy"
             np.save(o_out_path, o_out)
             self.dec_training[-1].update(
                 {
