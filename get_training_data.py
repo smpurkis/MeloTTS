@@ -6,11 +6,8 @@ import numpy as np
 from melo.api import TTS
 from melo.models import Generator
 import torch
-from torch import nn
 import torch.nn.functional as F
-from torch.utils.mobile_optimizer import optimize_for_mobile
 from tqdm.auto import tqdm
-import json
 
 # Speed is adjustable
 speed = 1.0
@@ -22,7 +19,7 @@ device = "cpu"  # Will automatically use GPU if available
 # English
 # text = "Did you ever hear a folk tale about a giant turtle? It's a story about a turtle that carries the world on its back."
 # texts = [text]
-texts = Path("/Users/user/demo_1/tts-pg/MeloTTS/bible-web.txt").read_text().split("\n")
+texts = Path("bible-web.txt").read_text().split("\n")
 
 # Load the model
 s = time()
@@ -139,10 +136,8 @@ for epoch in range(epochs):
             Path(point["x_in_path"]).unlink(missing_ok=True)
             Path(point["g_in_path"]).unlink(missing_ok=True)
             Path(point["o_out_path"]).unlink(missing_ok=True)
-        shutil.rmtree(
-            "/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data", ignore_errors=True
-        )
-        Path("/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data").mkdir(exist_ok=True)
+        shutil.rmtree("dec_distill/data", ignore_errors=True)
+        Path("dec_distill/data").mkdir(exist_ok=True)
 
         # train on batch
         if training:
@@ -177,5 +172,5 @@ for epoch in range(epochs):
     print("Saving model...")
     torch.save(
         distilled_generator.state_dict(),
-        f"/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/checkpoints/model_{epoch}_loss_{batch_loss}.pt",
+        f"dec_distill/checkpoints/model_{epoch}_loss_{batch_loss}.pt",
     )
