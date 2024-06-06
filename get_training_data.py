@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 from time import time
 
 import numpy as np
@@ -28,8 +29,9 @@ s = time()
 model = TTS(language="EN", device=device, use_onnx=False)
 print(f"Loaded model in {time() - s:.2f}s")
 speaker_ids = model.hps.data.spk2id
-
+output_path = "/tmp/en-default.wav"
 model.model.dec_training = []
+# model.tts_to_file("blah", speaker_ids["EN-US"], output_path, speed=speed)
 
 
 distilled_generator = Generator(
@@ -78,28 +80,33 @@ assert out.shape == out_distilled.shape, f"{out.shape} != {out_distilled.shape}"
 
 # use the weights of the last resblock of the original model on
 # the distilled model
-distilled_generator.resblock[-1].load_state_dict(
-    model.model.dec.resblock[-1].state_dict()
-)
+# distilled_generator.resblocks[-1].load_state_dict(
+#     model.model.dec.resblocks[-1].state_dict()
+# )
 
 # training
 
 epochs = 10
 
-output_path = "/tmp/en-default.wav"
-batch_size = 16
+batch_size = 10
+texts = texts[:1000]
+
 training = True
 
 optimizer = torch.optim.Adam(distilled_generator.parameters(), lr=1e-4)
 
-for epoch in tqdm(range(epochs), desc="Epochs"):
+for epoch in range(epochs):
+    print(f"Epoch {epoch + 1}/{epochs}")
+
     steps = len(texts) // batch_size
 
-    for step in range(steps, desc="Steps", leave=False):
-        training = step % 10 == 0
-        # print(f"Epoch {epoch + 1}/{epochs}, Step {step + 1}/{steps}")
+    for step in tqdm(range(steps), desc="Steps"):
+        training = step % 10 != 0
+        print(f"Epoch {epoch + 1}/{epochs}, Step {step + 1}/{steps}")
 
         batch = []
+
+        model.model.dec_training = []
 
         # generate the batch of data
         for i in tqdm(
@@ -110,12 +117,8 @@ for epoch in tqdm(range(epochs), desc="Epochs"):
             text = texts[step * batch_size + i]
 
             model.model.dec_training.append({"text": text})
-            model.tts_to_file(text, speaker_ids["EN-Default"], output_path, speed=speed)
-            json.dump(
-                model.model.dec_training,
-                open("/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data.json", "w"),
-                indent=4,
-                sort_keys=True,
+            model.tts_to_file(
+                text, speaker_ids["EN-Default"], output_path, speed=speed, quiet=True
             )
 
             # load batch of data to train on
@@ -131,6 +134,16 @@ for epoch in tqdm(range(epochs), desc="Epochs"):
 
             batch.append((x_in, g_in, o_out))
 
+        # clear the numpy files
+        for point in model.model.dec_training:
+            Path(point["x_in_path"]).unlink(missing_ok=True)
+            Path(point["g_in_path"]).unlink(missing_ok=True)
+            Path(point["o_out_path"]).unlink(missing_ok=True)
+        shutil.rmtree(
+            "/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data", ignore_errors=True
+        )
+        Path("/Users/user/demo_1/tts-pg/MeloTTS/dec_distill/data").mkdir(exist_ok=True)
+
         # train on batch
         if training:
             distilled_generator.train()
@@ -141,7 +154,9 @@ for epoch in tqdm(range(epochs), desc="Epochs"):
         batch_loss = 0
         optimizer.zero_grad()  # zero the gradient buffers
 
-        for x_in, g_in, o_out in tqdm(batch, desc="Batch", leave=False):
+        for x_in, g_in, o_out in tqdm(
+            batch, desc=f"Batch {'training' if training else 'evaluation'}", leave=False
+        ):
             output = distilled_generator(x_in, g_in)  # forward pass
             loss = F.mse_loss(output, o_out)
             loss = loss * torch.sqrt(
@@ -154,7 +169,9 @@ for epoch in tqdm(range(epochs), desc="Epochs"):
         if training:
             optimizer.step()  # does the update
 
-        print(f"Batch Loss: {batch_loss / len(batch)}")
+        print(
+            f"{'Training' if training else 'Evaluation'} Batch Loss: {batch_loss / len(batch)}"
+        )
 
     # save model
     print("Saving model...")
