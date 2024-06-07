@@ -1116,27 +1116,11 @@ class SynthesizerTrn(nn.Module):
         else:
             x = (z * y_mask)[:, :, :max_len]
             o = self.dec(x, g=g)
-            import numpy as np
-
-            x_in = x.numpy()
-            x_in_hash = hash(x_in.data.tobytes())
-            x_in_path = f"dec_distill/data/x_in_{x_in_hash}.npy"
-            np.save(x_in_path, x_in)
-
-            g_in = g.numpy()
-            g_in_hash = hash(g_in.data.tobytes())
-            g_in_path = f"dec_distill/data/g_in_{g_in_hash}.npy"
-            np.save(g_in_path, g_in)
-
-            o_out = o.numpy()
-            o_out_hash = hash(o_out.data.tobytes())
-            o_out_path = f"dec_distill/data/o_out_{o_out_hash}.npy"
-            np.save(o_out_path, o_out)
             self.dec_training[-1].update(
                 {
-                    "x_in_path": x_in_path,
-                    "g_in_path": g_in_path,
-                    "o_out_path": o_out_path,
+                    "x_in": x,
+                    "g_in": g,
+                    "o_out": o,
                 }
             )
         # print("dec time:", time() - s)

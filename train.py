@@ -16,7 +16,9 @@ speed = 1.0
 
 # CPU is sufficient for real-time inference.
 # You can set it manually to 'cpu' or 'cuda' or 'cuda:0' or 'mps'
-device = "cpu"  # Will automatically use GPU if available
+device_str = "gpu" if torch.cuda.is_available() else "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+dtype = torch.float32
 
 # English
 # text = "Did you ever hear a folk tale about a giant turtle? It's a story about a turtle that carries the world on its back."
@@ -25,7 +27,7 @@ texts = Path("bible-web.txt").read_text().split("\n")
 
 # Load the model
 s = time()
-model = TTS(language="EN", device=device, use_onnx=False)
+model = TTS(language="EN", device=device_str, use_onnx=False)
 print(f"Loaded model in {time() - s:.2f}s")
 speaker_ids = model.hps.data.spk2id
 output_path = "/tmp/en-default.wav"
@@ -92,7 +94,7 @@ assert out.shape == out_distilled.shape, f"{out.shape} != {out_distilled.shape}"
 np.random.seed(0)
 np.random.shuffle(texts)
 
-evaluation_split = 0.1
+evaluation_split = 0.01
 
 training_texts = texts[: int(len(texts) * (1 - evaluation_split))]
 evaluation_texts = texts[int(len(texts) * (1 - evaluation_split) + 1) :]
@@ -101,11 +103,14 @@ training = True
 
 lr = 1e-3
 
-optimizer = torch.optim.Adam(distilled_generator.parameters(), lr=lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3_000, gamma=0.1)
-
 epochs = 10
-batch_size = 32
+batch_size = 128
+steps = len(training_texts) // batch_size
+eval_steps = len(evaluation_texts) // batch_size
+
+distilled_generator.train().to(device)
+optimizer = torch.optim.Adam(distilled_generator.parameters(), lr=lr)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=2 * steps, gamma=0.1)
 
 wandb.init(
     # set the wandb project where this run will be logged
@@ -113,8 +118,6 @@ wandb.init(
     # track hyperparameters and run metadata
     config={
         "learning_rate": lr,
-        "architecture": "Generator",
-        "dataset": "web-bible",
         "epochs": epochs,
         "batch_size": batch_size,
         "evaluation_split": evaluation_split,
@@ -128,7 +131,10 @@ wandb.init(
 for epoch in range(epochs):
     print(f"Epoch {epoch + 1}/{epochs}")
 
-    steps = len(texts) // batch_size
+    epoch_loss = 0
+    epoch_evaluation_loss = 0
+
+    eval_step_counter = 0
 
     for step in tqdm(range(steps), desc="Steps"):
         training = step % 10 != 0
@@ -147,7 +153,10 @@ for epoch in range(epochs):
             if training:
                 text = training_texts[step * batch_size + i]
             else:
-                text = evaluation_texts[step * batch_size + i]
+                if eval_steps == eval_step_counter:
+                    eval_step_counter = 0
+                text = evaluation_texts[eval_step_counter * batch_size + i]
+                eval_step_counter += 1
 
             model.model.dec_training.append({"text": text})
             model.tts_to_file(
@@ -156,24 +165,10 @@ for epoch in range(epochs):
 
             # load batch of data to train on
             point = model.model.dec_training.pop(0)
-            x_in = np.load(point["x_in_path"])
-            x_in = torch.tensor(x_in, dtype=torch.float32).to(device)
-
-            g_in = np.load(point["g_in_path"])
-            g_in = torch.tensor(g_in, dtype=torch.float32).to(device)
-
-            o_out = np.load(point["o_out_path"])
-            o_out = torch.tensor(o_out, dtype=torch.float32).to(device)
-
+            x_in = point["x_in"].type(dtype).to(device)
+            g_in = point["g_in"].type(dtype).to(device)
+            o_out = point["o_out"].type(dtype).to(device)
             batch.append((x_in, g_in, o_out))
-
-        # clear the numpy files
-        for point in model.model.dec_training:
-            Path(point["x_in_path"]).unlink(missing_ok=True)
-            Path(point["g_in_path"]).unlink(missing_ok=True)
-            Path(point["o_out_path"]).unlink(missing_ok=True)
-        shutil.rmtree("dec_distill/data", ignore_errors=True)
-        Path("dec_distill/data").mkdir(exist_ok=True)
 
         # train on batch
         if training:
@@ -183,23 +178,25 @@ for epoch in range(epochs):
 
         # run the whole batch through then run backwards and optimize
         batch_loss = 0
-        optimizer.zero_grad()  # zero the gradient buffers
+        if training:
+            optimizer.zero_grad()  # zero the gradient buffers
 
         for x_in, g_in, o_out in tqdm(
             batch, desc=f"Batch {'training' if training else 'evaluation'}", leave=False
         ):
             output = distilled_generator(x_in, g_in)  # forward pass
             loss = F.mse_loss(output, o_out)
-            loss = loss * torch.sqrt(
-                torch.tensor(len(output)).float()
-            )  # weight the loss
             if training:
                 loss.backward()  # backpropagation
             batch_loss += loss.item()
         batch_loss /= len(batch)
+        if training:
+            epoch_loss += batch_loss
+        else:
+            epoch_evaluation_loss += batch_loss
 
         if training:
-            scheduler.step()
+            optimizer.step()  # Does the update
 
         print(
             f"{'Training' if training else 'Evaluation'} Batch Loss: {batch_loss / len(batch)}"
@@ -209,19 +206,36 @@ for epoch in range(epochs):
         if training:
             wandb.log(
                 {
-                    "epoch": epoch,
-                    "step": step,
-                    "loss": batch_loss,
+                    "step": epoch * steps + step,
+                    "loss": epoch_loss,
                 }
             )
         else:
             wandb.log(
                 {
-                    "epoch": epoch,
-                    "step": step,
-                    "evaluation_loss": batch_loss,
+                    "step": epoch * steps + step,
+                    "evaluation_loss": epoch_evaluation_loss,
                 }
             )
+    # wandb log epoch, step, evaluation/training losses
+    if training:
+        wandb.log(
+            {
+                "epoch": epoch,
+                "loss": batch_loss,
+            }
+        )
+    else:
+        wandb.log(
+            {
+                "epoch": epoch,
+                "evaluation_loss": batch_loss,
+            }
+        )
+
+    scheduler.step()
+
+    Path("dec_distill/checkpoints").mkdir(exist_ok=True)
 
     # save model
     print("Saving model...")
