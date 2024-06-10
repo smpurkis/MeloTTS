@@ -492,7 +492,6 @@ class Generator(torch.nn.Module):
         # resblock = modules.ResBlock1 if resblock == "1" else modules.ResBlock2
 
         self.ups = nn.ModuleList()
-        print("Generator init code being run")
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
             self.ups.append(
                 torch.nn.utils.weight_norm(
