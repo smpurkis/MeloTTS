@@ -11,3 +11,6 @@ build/
 *.wav
 .venv
 *.npy
+wandb/
+lightning_logs/
+.vscode/
