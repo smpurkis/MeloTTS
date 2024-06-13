@@ -913,9 +913,9 @@ class SynthesizerTrn(nn.Module):
             gin_channels=gin_channels,
         )
 
-        self.dec_onnx = ort.InferenceSession(
-            "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
-        )
+        # self.dec_onnx = ort.InferenceSession(
+        #     "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
+        # )
         # self.dec = torch.jit.script(self.dec)
         self.enc_q = PosteriorEncoder(
             spec_channels,
