@@ -1,5 +1,5 @@
 import math
-from time import time
+from typing import Optional
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -11,10 +11,7 @@ from melo import attentions
 from torch.nn import Conv1d, ConvTranspose1d, Conv2d
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 
-from melo.commons import init_weights, get_padding
-import melo.monotonic_align as monotonic_align
-
-import onnxruntime as ort
+from melo.commons import get_padding
 
 
 class DurationDiscriminator(nn.Module):  # vits2
@@ -147,13 +144,20 @@ class TransformerCouplingBlock(nn.Module):
             )
             self.flows.append(modules.Flip())
 
-    def forward(self, x, x_mask, g=None, reverse=False):
+    def forward(self, x, x_mask, g=None, reverse: bool = False):
         if not reverse:
             for flow in self.flows:
                 x, _ = flow(x, x_mask, g=g, reverse=reverse)
         else:
-            for flow in reversed(self.flows):
-                x = flow(x, x_mask, g=g, reverse=reverse)
+            # for i, flow in enumerate(reversed(self.flows)):
+            #     print(f"{i=} {type(flow)=}, {x[0][0][:5]=}")
+            #     x, _ = flow(x, x_mask, g=g, reverse=reverse)
+            reversed_i = len(self.flows) - 1
+            for _ in range(len(self.flows)):
+                for j, flow in enumerate(self.flows):
+                    if reversed_i == j:
+                        x, _ = flow(x, x_mask, g=g, reverse=reverse)
+                        reversed_i -= 1
         return x
 
 
@@ -206,22 +210,31 @@ class StochasticDurationPredictor(nn.Module):
         if gin_channels != 0:
             self.cond = nn.Conv1d(gin_channels, filter_channels, 1)
 
-    def forward(self, x, x_mask, w=None, g=None, reverse=False, noise_scale=1.0):
+    def forward(
+        self,
+        x,
+        x_mask,
+        w=None,
+        g=None,
+        reverse: bool = False,
+        noise_scale: float = 1.0,
+    ):
         x = torch.detach(x)
         x = self.pre(x)
         if g is not None:
             g = torch.detach(g)
             x = x + self.cond(g)
-        x = self.convs(x, x_mask)
+        x = self.convs(x, x_mask, g=None)
         x = self.proj(x) * x_mask
 
         if not reverse:
             flows = self.flows
-            assert w is not None
+            # assert w is not None
+            assert w != torch.tensor(0)
 
             logdet_tot_q = 0
             h_w = self.post_pre(w)
-            h_w = self.post_convs(h_w, x_mask)
+            h_w = self.post_convs(h_w, x_mask, g=None)
             h_w = self.post_proj(h_w) * x_mask
             e_q = (
                 torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=x.dtype)
@@ -255,14 +268,25 @@ class StochasticDurationPredictor(nn.Module):
             )
             return nll + logq  # [b]
         else:
-            flows = list(reversed(self.flows))
-            flows = flows[:-2] + [flows[-1]]  # remove a useless vflow
+            # flows = list(reversed(self.flows))
+            # flows = flows[:-2] + [flows[-1]]  # remove a useless vflow
+            # z = (
+            #     torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=x.dtype)
+            #     * noise_scale
+            # )
+            # for flow in flows:
+            #     z, _ = flow(z, x_mask, g=x, reverse=reverse)
             z = (
                 torch.randn(x.size(0), 2, x.size(2)).to(device=x.device, dtype=x.dtype)
                 * noise_scale
             )
-            for flow in flows:
-                z = flow(z, x_mask, g=x, reverse=reverse)
+            reversed_i = len(self.flows) - 1
+            skip_i = len(self.flows) - 2
+            for _ in range(len(self.flows)):
+                for j, flow in enumerate(self.flows):
+                    if reversed_i == j and reversed_i != skip_i:
+                        z, _ = flow(z, x_mask, g=x, reverse=reverse)
+                    reversed_i -= 1
             z0, z1 = torch.split(z, [1, 1], 1)
             logw = z0
             return logw
@@ -425,7 +449,7 @@ class ResidualCouplingBlock(nn.Module):
                 x, _ = flow(x, x_mask, g=g, reverse=reverse)
         else:
             for flow in reversed(self.flows):
-                x = flow(x, x_mask, g=g, reverse=reverse)
+                x, _ = flow(x, x_mask, g=g, reverse=reverse)
         return x
 
 
@@ -459,7 +483,7 @@ class PosteriorEncoder(nn.Module):
         )
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
-    def forward(self, x, x_lengths, g=None, tau=1.0):
+    def forward(self, x, x_lengths, g=None, tau: float = 1.0):
         x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(2)), 1).to(
             x.dtype
         )
@@ -574,41 +598,42 @@ class Generator(torch.nn.Module):
 
     # from https://github.com/pytorch/pytorch/issues/57289#issuecomment-1561331140
     def __prepare_scriptable__(self):
-        for up in self.ups:
-            for hook in up._forward_pre_hooks.values():
-                # The hook we want to remove is an instance of WeightNorm class, so
-                # normally we would do `if isinstance(...)` but this class is not accessible
-                # because of shadowing, so we check the module name directly.
-                # https://github.com/pytorch/pytorch/blob/be0ca00c5ce260eb5bcec3237357f7a30cc08983/torch/nn/utils/__init__.py#L3
-                if (
-                    hook.__module__ == "torch.nn.utils.weight_norm"
-                    and hook.__class__.__name__ == "WeightNorm"
-                ):
-                    torch.nn.utils.remove_weight_norm(up)
-        for resblock in self.resblocks:
-            if isinstance(resblock, modules.ResBlock1):
-                for conv in resblock.convs1:
-                    for hook in conv._forward_pre_hooks.values():
-                        if (
-                            hook.__module__ == "torch.nn.utils.weight_norm"
-                            and hook.__class__.__name__ == "WeightNorm"
-                        ):
-                            torch.nn.utils.remove_weight_norm(conv)
-                for conv in resblock.convs2:
-                    for hook in conv._forward_pre_hooks.values():
-                        if (
-                            hook.__module__ == "torch.nn.utils.weight_norm"
-                            and hook.__class__.__name__ == "WeightNorm"
-                        ):
-                            torch.nn.utils.remove_weight_norm(conv)
-            elif isinstance(resblock, modules.ResBlock2):
-                for conv in resblock.convs:
-                    for hook in conv._forward_pre_hooks.values():
-                        if (
-                            hook.__module__ == "torch.nn.utils.weight_norm"
-                            and hook.__class__.__name__ == "WeightNorm"
-                        ):
-                            torch.nn.utils.remove_weight_norm(conv)
+        self.remove_weight_norm()
+        # for up in self.ups:
+        #     for hook in up._forward_pre_hooks.values():
+        #         # The hook we want to remove is an instance of WeightNorm class, so
+        #         # normally we would do `if isinstance(...)` but this class is not accessible
+        #         # because of shadowing, so we check the module name directly.
+        #         # https://github.com/pytorch/pytorch/blob/be0ca00c5ce260eb5bcec3237357f7a30cc08983/torch/nn/utils/__init__.py#L3
+        #         if (
+        #             hook.__module__ == "torch.nn.utils.weight_norm"
+        #             and hook.__class__.__name__ == "WeightNorm"
+        #         ):
+        #             torch.nn.utils.remove_weight_norm(up)
+        # for resblock in self.resblocks:
+        #     if isinstance(resblock, modules.ResBlock1):
+        #         for conv in resblock.convs1:
+        #             for hook in conv._forward_pre_hooks.values():
+        #                 if (
+        #                     hook.__module__ == "torch.nn.utils.weight_norm"
+        #                     and hook.__class__.__name__ == "WeightNorm"
+        #                 ):
+        #                     torch.nn.utils.remove_weight_norm(conv)
+        #         for conv in resblock.convs2:
+        #             for hook in conv._forward_pre_hooks.values():
+        #                 if (
+        #                     hook.__module__ == "torch.nn.utils.weight_norm"
+        #                     and hook.__class__.__name__ == "WeightNorm"
+        #                 ):
+        #                     torch.nn.utils.remove_weight_norm(conv)
+        #     elif isinstance(resblock, modules.ResBlock2):
+        #         for conv in resblock.convs:
+        #             for hook in conv._forward_pre_hooks.values():
+        #                 if (
+        #                     hook.__module__ == "torch.nn.utils.weight_norm"
+        #                     and hook.__class__.__name__ == "WeightNorm"
+        #                 ):
+        #                     torch.nn.utils.remove_weight_norm(conv)
         return self
 
 
@@ -901,7 +926,6 @@ class SynthesizerTrn(nn.Module):
             num_languages=num_languages,
             num_tones=num_tones,
         )
-        # self.enc_p = torch.jit.script(self.enc_p)
         self.dec = Generator(
             inter_channels,
             resblock,
@@ -912,11 +936,6 @@ class SynthesizerTrn(nn.Module):
             upsample_kernel_sizes,
             gin_channels=gin_channels,
         )
-
-        # self.dec_onnx = ort.InferenceSession(
-        #     "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
-        # )
-        # self.dec = torch.jit.script(self.dec)
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -963,125 +982,135 @@ class SynthesizerTrn(nn.Module):
             )
         self.use_vc = use_vc
 
-    def forward(self, x, x_lengths, y, y_lengths, sid, tone, language, bert, ja_bert):
-        if self.n_speakers > 0:
-            g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
-        else:
-            g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
-        if self.use_vc:
-            g_p = None
-        else:
-            g_p = g
-        x, m_p, logs_p, x_mask = self.enc_p(
-            x, x_lengths, tone, language, bert, ja_bert, g=g_p
-        )
-        z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
-        z_p = self.flow(z, y_mask, g=g)
+        # self.enc_p = torch.jit.script(self.enc_p)
+        # print("enc_p is scripted")
+        # self.dec = torch.jit.script(self.dec)
+        # print("dec is scripted")
+        # self.enc_q = torch.jit.script(self.enc_q)
+        # print("enc_q is scripted")
+        # self.flow = torch.jit.script(self.flow)
+        # print("flow is scripted")
+        # self.sdp = torch.jit.script(self.sdp)
+        # print("sdp is scripted")
+        # self.dp = torch.jit.script(self.dp)
+        # print("dp is scripted")
+        # if n_speakers > 0:
+        #     self.emb_g = torch.jit.script(self.emb_g)
+        #     print("emb_g is scripted")
+        # else:
+        #     self.ref_enc = torch.jit.script(self.ref_enc)
+        #     print("ref_enc is scripted")
 
-        with torch.no_grad():
-            # negative cross-entropy
-            s_p_sq_r = torch.exp(-2 * logs_p)  # [b, d, t]
-            neg_cent1 = torch.sum(
-                -0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True
-            )  # [b, 1, t_s]
-            neg_cent2 = torch.matmul(
-                -0.5 * (z_p**2).transpose(1, 2), s_p_sq_r
-            )  # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
-            neg_cent3 = torch.matmul(
-                z_p.transpose(1, 2), (m_p * s_p_sq_r)
-            )  # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
-            neg_cent4 = torch.sum(
-                -0.5 * (m_p**2) * s_p_sq_r, [1], keepdim=True
-            )  # [b, 1, t_s]
-            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
-            if self.use_noise_scaled_mas:
-                epsilon = (
-                    torch.std(neg_cent)
-                    * torch.randn_like(neg_cent)
-                    * self.current_mas_noise_scale
-                )
-                neg_cent = neg_cent + epsilon
+    # def forward(self, x, x_lengths, y, y_lengths, sid, tone, language, bert, ja_bert):
+    #     if self.n_speakers > 0:
+    #         g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
+    #     else:
+    #         g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
+    #     if self.use_vc:
+    #         g_p = None
+    #     else:
+    #         g_p = g
+    #     x, m_p, logs_p, x_mask = self.enc_p(
+    #         x, x_lengths, tone, language, bert, ja_bert, g=g_p
+    #     )
+    #     z, m_q, logs_q, y_mask = self.enc_q(y, y_lengths, g=g)
+    #     z_p = self.flow(z, y_mask, g=g)
 
-            attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
-            attn = (
-                monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1))
-                .unsqueeze(1)
-                .detach()
-            )
+    #     with torch.no_grad():
+    #         # negative cross-entropy
+    #         s_p_sq_r = torch.exp(-2 * logs_p)  # [b, d, t]
+    #         neg_cent1 = torch.sum(
+    #             -0.5 * math.log(2 * math.pi) - logs_p, [1], keepdim=True
+    #         )  # [b, 1, t_s]
+    #         neg_cent2 = torch.matmul(
+    #             -0.5 * (z_p**2).transpose(1, 2), s_p_sq_r
+    #         )  # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+    #         neg_cent3 = torch.matmul(
+    #             z_p.transpose(1, 2), (m_p * s_p_sq_r)
+    #         )  # [b, t_t, d] x [b, d, t_s] = [b, t_t, t_s]
+    #         neg_cent4 = torch.sum(
+    #             -0.5 * (m_p**2) * s_p_sq_r, [1], keepdim=True
+    #         )  # [b, 1, t_s]
+    #         neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+    #         if self.use_noise_scaled_mas:
+    #             epsilon = (
+    #                 torch.std(neg_cent)
+    #                 * torch.randn_like(neg_cent)
+    #                 * self.current_mas_noise_scale
+    #             )
+    #             neg_cent = neg_cent + epsilon
 
-        w = attn.sum(2)
+    #         attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
+    #         attn = (
+    #             monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1))
+    #             .unsqueeze(1)
+    #             .detach()
+    #         )
 
-        l_length_sdp = self.sdp(x, x_mask, w, g=g)
-        l_length_sdp = l_length_sdp / torch.sum(x_mask)
+    #     w = attn.sum(2)
 
-        logw_ = torch.log(w + 1e-6) * x_mask
-        logw = self.dp(x, x_mask, g=g)
-        l_length_dp = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(
-            x_mask
-        )  # for averaging
+    #     l_length_sdp = self.sdp(x, x_mask, w, g=g)
+    #     l_length_sdp = l_length_sdp / torch.sum(x_mask)
 
-        l_length = l_length_dp + l_length_sdp
+    #     logw_ = torch.log(w + 1e-6) * x_mask
+    #     logw = self.dp(x, x_mask, g=g)
+    #     l_length_dp = torch.sum((logw - logw_) ** 2, [1, 2]) / torch.sum(
+    #         x_mask
+    #     )  # for averaging
 
-        # expand prior
-        m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
-        logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+    #     l_length = l_length_dp + l_length_sdp
 
-        z_slice, ids_slice = commons.rand_slice_segments(
-            z, y_lengths, self.segment_size
-        )
-        o = self.dec(z_slice, g=g)
-        return (
-            o,
-            l_length,
-            attn,
-            ids_slice,
-            x_mask,
-            y_mask,
-            (z, z_p, m_p, logs_p, m_q, logs_q),
-            (x, logw, logw_),
-        )
+    #     # expand prior
+    #     m_p = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
+    #     logs_p = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
 
-    def infer(
+    #     z_slice, ids_slice = commons.rand_slice_segments(
+    #         z, y_lengths, self.segment_size
+    #     )
+    #     o = self.dec(z_slice, g=g)
+    #     return (
+    #         o,
+    #         l_length,
+    #         attn,
+    #         ids_slice,
+    #         x_mask,
+    #         y_mask,
+    #         (z, z_p, m_p, logs_p, m_q, logs_q),
+    #         (x, logw, logw_),
+    #     )
+
+    def forward(
         self,
-        x,
-        x_lengths,
-        sid,
-        tone,
-        language,
-        bert,
-        ja_bert,
-        noise_scale=0.667,
-        length_scale=1,
-        noise_scale_w=0.8,
-        max_len=None,
-        sdp_ratio=0,
-        y=None,
-        g=None,
+        x: torch.Tensor,
+        x_lengths: torch.Tensor,
+        sid: torch.Tensor,
+        tone: torch.Tensor,
+        language: torch.Tensor,
+        bert: torch.Tensor,
+        ja_bert: torch.Tensor,
+        noise_scale: float = 0.667,
+        length_scale: float = 1.0,
+        noise_scale_w: float = 0.8,
+        max_len: Optional[int] = None,
+        sdp_ratio: float = 0,
+        y: torch.Tensor = None,
+        g: torch.Tensor = None,
     ):
-        # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
-        # g = self.gst(y)
-        s = time()
         if g is None:
             if self.n_speakers > 0:
                 g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
-            else:
-                g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
+            # else:
+            #     g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
         if self.use_vc:
             g_p = None
         else:
             g_p = g
-        # print("ref enc or emb_g time:", time() - s)
-        s = time()
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, bert, ja_bert, g=g_p
         )
-        # print("enc_p time:", time() - s)
-        s = time()
         logw = self.sdp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w) * (
             sdp_ratio
         ) + self.dp(x, x_mask, g=g) * (1 - sdp_ratio)
-        # print("sdp and dp time:", time() - s)
-        s = time()
         w = torch.exp(logw) * x_mask * length_scale
 
         w_ceil = torch.ceil(w)
@@ -1100,25 +1129,13 @@ class SynthesizerTrn(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        # print("ops time:", time() - s)
-        s = time()
         z = self.flow(z_p, y_mask, g=g, reverse=True)
-        # print("flow time:", time() - s)
-        # print(
-        #     f"x_in shape: {(z * y_mask)[:, :, :max_len].shape}, g_in shape: {g.shape}"
-        # )
-        s = time()
-        if self.use_onnx:
-            print("Using onnx")
-            x = (z * y_mask)[:, :, :max_len]
-            o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
-            o = torch.tensor(o)
-        else:
-            o = self.dec((z * y_mask)[:, :, :max_len], g=g)
-        print("dec time:", time() - s)
-        # print(f"o shape: {o.shape}")
-        s = time()
-        # print('max/min of o:', o.max(), o.min())
+        # if self.use_onnx:
+        #     x = (z * y_mask)[:, :, :max_len]
+        #     o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
+        #     o = torch.tensor(o)
+        # else:
+        o = self.dec((z * y_mask)[:, :, :max_len], g=g)
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
     def voice_conversion(self, y, y_lengths, sid_src, sid_tgt, tau=1.0):

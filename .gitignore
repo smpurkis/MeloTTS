@@ -11,3 +11,4 @@ build/
 *.wav
 .venv
 *.npy
+.vscode/*

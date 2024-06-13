@@ -4,7 +4,6 @@ import soundfile
 import numpy as np
 import torch.nn as nn
 from tqdm import tqdm
-import torch
 
 from . import utils
 from .models import SynthesizerTrn
@@ -137,7 +136,7 @@ class TTS(nn.Module):
                 del phones
                 speakers = torch.LongTensor([speaker_id]).to(device)
                 audio = (
-                    self.model.infer(
+                    self.model.forward(
                         x_tst,
                         x_tst_lengths,
                         speakers,
@@ -149,6 +148,9 @@ class TTS(nn.Module):
                         noise_scale=noise_scale,
                         noise_scale_w=noise_scale_w,
                         length_scale=1.0 / speed,
+                        y=None,
+                        g=None,
+                        max_len=None,
                     )[0][0, 0]
                     .data.cpu()
                     .float()
@@ -171,3 +173,71 @@ class TTS(nn.Module):
                 )
             else:
                 soundfile.write(output_path, audio, self.hps.data.sampling_rate)
+
+    def get_inputs(
+        self,
+        text,
+        speaker_id,
+        output_path=None,
+        sdp_ratio=0.2,
+        noise_scale=0.6,
+        noise_scale_w=0.8,
+        speed=1.0,
+        pbar=None,
+        format=None,
+        position=None,
+        quiet=False,
+    ):
+        language = self.language
+        # texts = self.split_sentences_into_pieces(text, language, quiet)
+        texts = []
+        # split on each sentence ending in ., !, or ?
+        for sentence in re.split(r"([.!?])", text):
+            if sentence:
+                if sentence in [".", "!", "?"]:
+                    texts[-1] += sentence
+                else:
+                    texts.append(sentence.strip())
+
+        audio_list = []
+        if pbar:
+            tx = pbar(texts)
+        else:
+            if position:
+                tx = tqdm(texts, position=position)
+            elif quiet:
+                tx = texts
+            else:
+                tx = tqdm(texts)
+        for t in tx:
+            if language in ["EN", "ZH_MIX_EN"]:
+                t = re.sub(r"([a-z])([A-Z])", r"\1 \2", t)
+            device = self.device
+            bert, ja_bert, phones, tones, lang_ids = utils.get_text_for_tts_infer(
+                t, language, self.hps, device, self.symbol_to_id
+            )
+            with torch.no_grad():
+                x_tst = phones.to(device).unsqueeze(0)
+                tones = tones.to(device).unsqueeze(0)
+                lang_ids = lang_ids.to(device).unsqueeze(0)
+                bert = bert.to(device).unsqueeze(0)
+                ja_bert = ja_bert.to(device).unsqueeze(0)
+                x_tst_lengths = torch.LongTensor([phones.size(0)]).to(device)
+                del phones
+                speakers = torch.LongTensor([speaker_id]).to(device)
+                return {
+                    "x": x_tst,
+                    "x_lengths": x_tst_lengths,
+                    "sid": speakers,
+                    "tone": tones,
+                    "language": lang_ids,
+                    "bert": bert,
+                    "ja_bert": ja_bert,
+                    "sdp_ratio": sdp_ratio,
+                    "noise_scale": noise_scale,
+                    "noise_scale_w": noise_scale_w,
+                    "length_scale": 1.0 / speed,
+                    "y": None,
+                    "g": torch.tensor(0),
+                    "max_len": None,
+                }

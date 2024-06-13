@@ -118,12 +118,24 @@ class DDSConv(nn.Module):
     def forward(self, x, x_mask, g=None):
         if g is not None:
             x = x + g
-        for i in range(self.n_layers):
-            y = self.convs_sep[i](x * x_mask)
-            y = self.norms_1[i](y)
+        # for i in range(self.n_layers):
+        #     y = self.convs_sep[i](x * x_mask)
+        #     y = self.norms_1[i](y)
+        #     y = F.gelu(y)
+        #     y = self.convs_1x1[i](y)
+        #     y = self.norms_2[i](y)
+        #     y = F.gelu(y)
+        #     y = self.drop(y)
+        #     x = x + y
+
+        for conv_sep, norm_1, conv_1x1, norm_2 in zip(
+            self.convs_sep, self.norms_1, self.convs_1x1, self.norms_2
+        ):
+            y = conv_sep(x * x_mask)
+            y = norm_1(y)
             y = F.gelu(y)
-            y = self.convs_1x1[i](y)
-            y = self.norms_2[i](y)
+            y = conv_1x1(y)
+            y = norm_2(y)
             y = F.gelu(y)
             y = self.drop(y)
             x = x + y
@@ -138,7 +150,7 @@ class WN(torch.nn.Module):
         dilation_rate,
         n_layers,
         gin_channels=0,
-        p_dropout=0,
+        p_dropout: float = 0.0,
     ):
         super(WN, self).__init__()
         assert kernel_size % 2 == 1
@@ -147,11 +159,11 @@ class WN(torch.nn.Module):
         self.dilation_rate = dilation_rate
         self.n_layers = n_layers
         self.gin_channels = gin_channels
-        self.p_dropout = p_dropout
+        self.p_dropout = float(p_dropout)
 
         self.in_layers = torch.nn.ModuleList()
         self.res_skip_layers = torch.nn.ModuleList()
-        self.drop = nn.Dropout(p_dropout)
+        self.drop = nn.Dropout(self.p_dropout)
 
         if gin_channels != 0:
             cond_layer = torch.nn.Conv1d(
@@ -182,15 +194,34 @@ class WN(torch.nn.Module):
             res_skip_layer = torch.nn.utils.weight_norm(res_skip_layer, name="weight")
             self.res_skip_layers.append(res_skip_layer)
 
-    def forward(self, x, x_mask, g=None, **kwargs):
+    def forward(self, x, x_mask, g=None):
         output = torch.zeros_like(x)
         n_channels_tensor = torch.IntTensor([self.hidden_channels])
 
         if g is not None:
             g = self.cond_layer(g)
 
-        for i in range(self.n_layers):
-            x_in = self.in_layers[i](x)
+        # for i in range(self.n_layers):
+        #     x_in = self.in_layers[i](x)
+        #     if g is not None:
+        #         cond_offset = i * 2 * self.hidden_channels
+        #         g_l = g[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
+        #     else:
+        #         g_l = torch.zeros_like(x_in)
+
+        #     acts = commons.fused_add_tanh_sigmoid_multiply(x_in, g_l, n_channels_tensor)
+        #     acts = self.drop(acts)
+
+        #     res_skip_acts = self.res_skip_layers[i](acts)
+        #     if i < self.n_layers - 1:
+        #         res_acts = res_skip_acts[:, : self.hidden_channels, :]
+        #         x = (x + res_acts) * x_mask
+        #         output = output + res_skip_acts[:, self.hidden_channels :, :]
+        #     else:
+        #         output = output + res_skip_acts
+        for i, layers in enumerate(zip(self.in_layers, self.res_skip_layers)):
+            in_layer, res_skip_layer = layers
+            x_in = in_layer(x)
             if g is not None:
                 cond_offset = i * 2 * self.hidden_channels
                 g_l = g[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
@@ -200,7 +231,7 @@ class WN(torch.nn.Module):
             acts = commons.fused_add_tanh_sigmoid_multiply(x_in, g_l, n_channels_tensor)
             acts = self.drop(acts)
 
-            res_skip_acts = self.res_skip_layers[i](acts)
+            res_skip_acts = res_skip_layer(acts)
             if i < self.n_layers - 1:
                 res_acts = res_skip_acts[:, : self.hidden_channels, :]
                 x = (x + res_acts) * x_mask
@@ -216,6 +247,21 @@ class WN(torch.nn.Module):
             torch.nn.utils.remove_weight_norm(l)
         for l in self.res_skip_layers:
             torch.nn.utils.remove_weight_norm(l)
+
+    def __prepare_scriptable__(self):
+        # for layer in self.in_layers + self.res_skip_layers + [self.cond_layer]:
+        #     for hook in layer._forward_pre_hooks.values():
+        #         # The hook we want to remove is an instance of WeightNorm class, so
+        #         # normally we would do `if isinstance(...)` but this class is not accessible
+        #         # because of shadowing, so we check the module name directly.
+        #         # https://github.com/pytorch/pytorch/blob/be0ca00c5ce260eb5bcec3237357f7a30cc08983/torch/nn/utils/__init__.py#L3
+        #         if (
+        #             hook.__module__ == "torch.nn.utils.weight_norm"
+        #             and hook.__class__.__name__ == "WeightNorm"
+        #         ):
+        #             torch.nn.utils.remove_weight_norm(layer)
+        self.remove_weight_norm()
+        return self
 
 
 class ResBlock1(torch.nn.Module):
@@ -353,24 +399,24 @@ class ResBlock2(torch.nn.Module):
 
 
 class Log(nn.Module):
-    def forward(self, x, x_mask, reverse=False, **kwargs):
+    def forward(self, x, x_mask, reverse: bool = False):
         if not reverse:
             y = torch.log(torch.clamp_min(x, 1e-5)) * x_mask
             logdet = torch.sum(-y, [1, 2])
             return y, logdet
         else:
             x = torch.exp(x) * x_mask
-            return x
+            return x, torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
 
 
 class Flip(nn.Module):
-    def forward(self, x, *args, reverse=False, **kwargs):
+    def forward(self, x, x_mask, g=None, reverse: bool = False):
         x = torch.flip(x, [1])
         if not reverse:
             logdet = torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
             return x, logdet
         else:
-            return x
+            return x, torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
 
 
 class ElementwiseAffine(nn.Module):
@@ -380,7 +426,7 @@ class ElementwiseAffine(nn.Module):
         self.m = nn.Parameter(torch.zeros(channels, 1))
         self.logs = nn.Parameter(torch.zeros(channels, 1))
 
-    def forward(self, x, x_mask, reverse=False, **kwargs):
+    def forward(self, x, x_mask, g=None, reverse: bool = False):
         if not reverse:
             y = self.m + torch.exp(self.logs) * x
             y = y * x_mask
@@ -388,7 +434,7 @@ class ElementwiseAffine(nn.Module):
             return y, logdet
         else:
             x = (x - self.m) * torch.exp(-self.logs) * x_mask
-            return x
+            return x, torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
 
 
 class ResidualCouplingLayer(nn.Module):
@@ -445,7 +491,7 @@ class ResidualCouplingLayer(nn.Module):
         else:
             x1 = (x1 - m) * torch.exp(-logs) * x_mask
             x = torch.cat([x0, x1], 1)
-            return x
+            return x, torch.zeros(x.size(0)).to(dtype=x.dtype, device=x.device)
 
 
 class ConvFlow(nn.Module):
@@ -475,7 +521,7 @@ class ConvFlow(nn.Module):
         self.proj.weight.data.zero_()
         self.proj.bias.data.zero_()
 
-    def forward(self, x, x_mask, g=None, reverse=False):
+    def forward(self, x, x_mask, g=None, reverse: bool = False):
         x0, x1 = torch.split(x, [self.half_channels] * 2, 1)
         h = self.pre(x0)
         h = self.convs(h, x_mask, g=g)
@@ -496,7 +542,7 @@ class ConvFlow(nn.Module):
             unnormalized_heights,
             unnormalized_derivatives,
             inverse=reverse,
-            tails="linear",
+            tails=1,
             tail_bound=self.tail_bound,
         )
 
@@ -505,7 +551,7 @@ class ConvFlow(nn.Module):
         if not reverse:
             return x, logdet
         else:
-            return x
+            return x, torch.zeros(0)
 
 
 class TransformerCouplingLayer(nn.Module):
@@ -551,7 +597,7 @@ class TransformerCouplingLayer(nn.Module):
         self.post.weight.data.zero_()
         self.post.bias.data.zero_()
 
-    def forward(self, x, x_mask, g=None, reverse=False):
+    def forward(self, x, x_mask, g=None, reverse: bool = False):
         x0, x1 = torch.split(x, [self.half_channels] * 2, 1)
         h = self.pre(x0) * x_mask
         h = self.enc(h, x_mask, g=g)
@@ -570,21 +616,21 @@ class TransformerCouplingLayer(nn.Module):
         else:
             x1 = (x1 - m) * torch.exp(-logs) * x_mask
             x = torch.cat([x0, x1], 1)
-            return x
+            return x, torch.zeros(0)
 
-        x1, logabsdet = piecewise_rational_quadratic_transform(
-            x1,
-            unnormalized_widths,
-            unnormalized_heights,
-            unnormalized_derivatives,
-            inverse=reverse,
-            tails="linear",
-            tail_bound=self.tail_bound,
-        )
+        # x1, logabsdet = piecewise_rational_quadratic_transform(
+        #     x1,
+        #     unnormalized_widths,
+        #     unnormalized_heights,
+        #     unnormalized_derivatives,
+        #     inverse=reverse,
+        #     tails="linear",
+        #     tail_bound=self.tail_bound,
+        # )
 
-        x = torch.cat([x0, x1], 1) * x_mask
-        logdet = torch.sum(logabsdet * x_mask, [1, 2])
-        if not reverse:
-            return x, logdet
-        else:
-            return x
+        # x = torch.cat([x0, x1], 1) * x_mask
+        # logdet = torch.sum(logabsdet * x_mask, [1, 2])
+        # if not reverse:
+        #     return x, logdet
+        # else:
+        #     return x

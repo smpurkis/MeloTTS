@@ -1,7 +1,6 @@
 import torch
 from torch.nn import functional as F
 
-import numpy as np
 
 
 DEFAULT_MIN_BIN_WIDTH = 1e-3
@@ -14,35 +13,34 @@ def piecewise_rational_quadratic_transform(
     unnormalized_widths,
     unnormalized_heights,
     unnormalized_derivatives,
-    inverse=False,
-    tails=None,
-    tail_bound=1.0,
-    min_bin_width=DEFAULT_MIN_BIN_WIDTH,
-    min_bin_height=DEFAULT_MIN_BIN_HEIGHT,
-    min_derivative=DEFAULT_MIN_DERIVATIVE,
+    inverse: bool = False,
+    tails: int = 1,
+    tail_bound: float = 1.0,
 ):
-    if tails is None:
-        spline_fn = rational_quadratic_spline
-        spline_kwargs = {}
-    else:
-        spline_fn = unconstrained_rational_quadratic_spline
-        spline_kwargs = {"tails": tails, "tail_bound": tail_bound}
+    # if tails is None:
+    #     spline_fn = rational_quadratic_spline
+    #     spline_kwargs = {}
+    # else:
+    # spline_fn = unconstrained_rational_quadratic_spline
+    # spline_kwargs = {"tails": tails, "tail_bound": tail_bound}
 
-    outputs, logabsdet = spline_fn(
+    outputs, logabsdet = unconstrained_rational_quadratic_spline(
         inputs=inputs,
         unnormalized_widths=unnormalized_widths,
         unnormalized_heights=unnormalized_heights,
         unnormalized_derivatives=unnormalized_derivatives,
         inverse=inverse,
-        min_bin_width=min_bin_width,
-        min_bin_height=min_bin_height,
-        min_derivative=min_derivative,
-        **spline_kwargs
+        min_bin_width=1e-3,
+        min_bin_height=1e-3,
+        min_derivative=1e-3,
+        tails=tails,
+        tail_bound=tail_bound,
+        # **spline_kwargs
     )
     return outputs, logabsdet
 
 
-def searchsorted(bin_locations, inputs, eps=1e-6):
+def searchsorted(bin_locations, inputs, eps: float = 1e-6):
     bin_locations[..., -1] += eps
     return torch.sum(inputs[..., None] >= bin_locations, dim=-1) - 1
 
@@ -52,12 +50,12 @@ def unconstrained_rational_quadratic_spline(
     unnormalized_widths,
     unnormalized_heights,
     unnormalized_derivatives,
-    inverse=False,
-    tails="linear",
-    tail_bound=1.0,
-    min_bin_width=DEFAULT_MIN_BIN_WIDTH,
-    min_bin_height=DEFAULT_MIN_BIN_HEIGHT,
-    min_derivative=DEFAULT_MIN_DERIVATIVE,
+    inverse: bool = False,
+    tails: int = 1,
+    tail_bound: float = 1.0,
+    min_bin_width: float = DEFAULT_MIN_BIN_WIDTH,
+    min_bin_height: float = DEFAULT_MIN_BIN_HEIGHT,
+    min_derivative: float = DEFAULT_MIN_DERIVATIVE,
 ):
     inside_interval_mask = (inputs >= -tail_bound) & (inputs <= tail_bound)
     outside_interval_mask = ~inside_interval_mask
@@ -65,9 +63,10 @@ def unconstrained_rational_quadratic_spline(
     outputs = torch.zeros_like(inputs)
     logabsdet = torch.zeros_like(inputs)
 
-    if tails == "linear":
+    if tails == 1:
         unnormalized_derivatives = F.pad(unnormalized_derivatives, pad=(1, 1))
-        constant = np.log(np.exp(1 - min_derivative) - 1)
+        # constant = np.log(np.exp(1 - min_derivative) - 1)
+        constant = torch.log(torch.exp(1 - torch.tensor(min_derivative)) - 1).item()
         unnormalized_derivatives[..., 0] = constant
         unnormalized_derivatives[..., -1] = constant
 
@@ -102,14 +101,14 @@ def rational_quadratic_spline(
     unnormalized_widths,
     unnormalized_heights,
     unnormalized_derivatives,
-    inverse=False,
-    left=0.0,
-    right=1.0,
-    bottom=0.0,
-    top=1.0,
-    min_bin_width=DEFAULT_MIN_BIN_WIDTH,
-    min_bin_height=DEFAULT_MIN_BIN_HEIGHT,
-    min_derivative=DEFAULT_MIN_DERIVATIVE,
+    inverse: bool = False,
+    left: float = 0.0,
+    right: float = 1.0,
+    bottom: float = 0.0,
+    top: float = 1.0,
+    min_bin_width: float = DEFAULT_MIN_BIN_WIDTH,
+    min_bin_height: float = DEFAULT_MIN_BIN_HEIGHT,
+    min_derivative: float = DEFAULT_MIN_DERIVATIVE,
 ):
     if torch.min(inputs) < left or torch.max(inputs) > right:
         raise ValueError("Input to a transform is not within its domain")
