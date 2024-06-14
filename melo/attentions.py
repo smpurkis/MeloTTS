@@ -99,7 +99,7 @@ class Encoder(nn.Module):
         attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
         x = x * x_mask
         # for i in range(self.n_layers):
-        #     if i == self.cond_layer_idx and g is not None:
+        #     if i == self.cond_layer_idx and len(g.shape) > 0:
         #         g = self.spk_emb_linear(g.transpose(1, 2))
         #         g = g.transpose(1, 2)
         #         x = x + g
@@ -115,7 +115,7 @@ class Encoder(nn.Module):
         for attn_layer, norm_layer_1, ffn_layer, norm_layer_2 in zip(
             self.attn_layers, self.norm_layers_1, self.ffn_layers, self.norm_layers_2
         ):
-            if i == self.cond_layer_idx and g is not None:
+            if i == self.cond_layer_idx and len(g.shape) > 0:
                 g = self.spk_emb_linear(g.transpose(1, 2))
                 g = g.transpose(1, 2)
                 x = x + g

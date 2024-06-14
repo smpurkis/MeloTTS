@@ -68,7 +68,7 @@ class DurationDiscriminator(nn.Module):  # vits2
 
     def forward(self, x, x_mask, dur_r, dur_hat, g=None):
         x = torch.detach(x)
-        if g is not None:
+        if len(g.shape) > 0:
             g = torch.detach(g)
             x = x + self.cond(g)
         x = self.conv_1(x * x_mask)
@@ -221,10 +221,10 @@ class StochasticDurationPredictor(nn.Module):
     ):
         x = torch.detach(x)
         x = self.pre(x)
-        if g is not None:
+        if len(g.shape) > 0:
             g = torch.detach(g)
             x = x + self.cond(g)
-        x = self.convs(x, x_mask, g=None)
+        x = self.convs(x, x_mask, g=torch.tensor(0))
         x = self.proj(x) * x_mask
 
         if not reverse:
@@ -234,7 +234,7 @@ class StochasticDurationPredictor(nn.Module):
 
             logdet_tot_q = 0
             h_w = self.post_pre(w)
-            h_w = self.post_convs(h_w, x_mask, g=None)
+            h_w = self.post_convs(h_w, x_mask, g=torch.tensor(0))
             h_w = self.post_proj(h_w) * x_mask
             e_q = (
                 torch.randn(w.size(0), 2, w.size(2)).to(device=x.device, dtype=x.dtype)
@@ -320,7 +320,7 @@ class DurationPredictor(nn.Module):
 
     def forward(self, x, x_mask, g=None):
         x = torch.detach(x)
-        if g is not None:
+        if len(g.shape) > 0:
             g = torch.detach(g)
             x = x + self.cond(g)
         x = self.conv_1(x * x_mask)
@@ -548,7 +548,7 @@ class Generator(torch.nn.Module):
 
     def forward(self, x, g=None):
         x = self.conv_pre(x)
-        if g is not None:
+        if len(g.shape) > 0:
             x = x + self.cond(g)
         LRELU_SLOPE = 0.1
         # for i in range(self.num_upsamples):
@@ -1091,24 +1091,17 @@ class SynthesizerTrn(nn.Module):
         noise_scale: float = 0.667,
         length_scale: float = 1.0,
         noise_scale_w: float = 0.8,
-        max_len: Optional[int] = None,
         sdp_ratio: float = 0,
-        y: torch.Tensor = None,
-        g: torch.Tensor = None,
     ):
-        if g is None:
-            if self.n_speakers > 0:
-                g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
-            # else:
-            #     g = self.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
+        g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
         if self.use_vc:
-            g_p = None
+            g_p = torch.tensor(0)
         else:
             g_p = g
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, bert, ja_bert, g=g_p
         )
-        logw = self.sdp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w) * (
+        logw = self.sdp(x, x_mask, w=torch.tensor(0), g=g, reverse=True, noise_scale=noise_scale_w) * (
             sdp_ratio
         ) + self.dp(x, x_mask, g=g) * (1 - sdp_ratio)
         w = torch.exp(logw) * x_mask * length_scale
@@ -1135,7 +1128,7 @@ class SynthesizerTrn(nn.Module):
         #     o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
         #     o = torch.tensor(o)
         # else:
-        o = self.dec((z * y_mask)[:, :, :max_len], g=g)
+        o = self.dec((z * y_mask)[:, :, :], g=g)
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
     def voice_conversion(self, y, y_lengths, sid_src, sid_tgt, tau=1.0):

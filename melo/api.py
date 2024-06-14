@@ -147,10 +147,8 @@ class TTS(nn.Module):
                         sdp_ratio=sdp_ratio,
                         noise_scale=noise_scale,
                         noise_scale_w=noise_scale_w,
-                        length_scale=1.0 / speed,
-                        y=None,
-                        g=None,
-                        max_len=None,
+                        # length_scale=1.0 / speed,
+                        # g=torch.tensor(0),
                     )[0][0, 0]
                     .data.cpu()
                     .float()
@@ -236,8 +234,9 @@ class TTS(nn.Module):
                     "sdp_ratio": sdp_ratio,
                     "noise_scale": noise_scale,
                     "noise_scale_w": noise_scale_w,
-                    "length_scale": 1.0 / speed,
-                    "y": None,
-                    "g": torch.tensor(0),
-                    "max_len": None,
+                    # "length_scale": 1.0 / speed,
+                    # "g": torch.tensor(0.0),
                 }
+
+    def get_outputs(self, inputs):
+        return self.model(**inputs)

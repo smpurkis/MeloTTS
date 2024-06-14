@@ -116,7 +116,7 @@ class DDSConv(nn.Module):
             self.norms_2.append(LayerNorm(channels))
 
     def forward(self, x, x_mask, g=None):
-        if g is not None:
+        if len(g.shape) > 0:
             x = x + g
         # for i in range(self.n_layers):
         #     y = self.convs_sep[i](x * x_mask)
@@ -198,12 +198,12 @@ class WN(torch.nn.Module):
         output = torch.zeros_like(x)
         n_channels_tensor = torch.IntTensor([self.hidden_channels])
 
-        if g is not None:
+        if len(g.shape) > 0:
             g = self.cond_layer(g)
 
         # for i in range(self.n_layers):
         #     x_in = self.in_layers[i](x)
-        #     if g is not None:
+        #     if len(g.shape) > 0:
         #         cond_offset = i * 2 * self.hidden_channels
         #         g_l = g[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
         #     else:
@@ -222,7 +222,7 @@ class WN(torch.nn.Module):
         for i, layers in enumerate(zip(self.in_layers, self.res_skip_layers)):
             in_layer, res_skip_layer = layers
             x_in = in_layer(x)
-            if g is not None:
+            if len(g.shape) > 0:
                 cond_offset = i * 2 * self.hidden_channels
                 g_l = g[:, cond_offset : cond_offset + 2 * self.hidden_channels, :]
             else:

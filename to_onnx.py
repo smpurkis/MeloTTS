@@ -1,5 +1,7 @@
 from time import time
 
+import numpy as np
+
 from melo.api import TTS
 import torch
 
@@ -18,19 +20,26 @@ s = time()
 model = TTS(language="EN", device=device, use_onnx=False)
 print(f"Loaded model in {time() - s:.2f}s")
 speaker_ids = model.hps.data.spk2id
-output_path = "en-us.wav"
+output_path = "en-br.wav"
+model.tts_to_file(text, speaker_ids["EN-BR"], output_path, speed=speed)
 
+inputs = model.get_inputs(text, speaker_ids["EN-BR"], output_path, speed=speed)
+model_scripted = torch.jit.script(model.model, example_inputs=inputs)
 
-# model_scripted = torch.jit.script(model.model)
+outputs = model.get_outputs(inputs)
 
-# inputs = model.get_inputs(text, speaker_ids["EN-US"], output_path, speed=speed)
+outputs_scripted = model_scripted(**inputs)
 
-# out = model_scripted(**inputs)
+model.model = model_scripted
+
+model.tts_to_file(text, speaker_ids["EN-BR"], output_path, speed=speed)
 
 # American accent
-s = time()
-model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
-print(f"Elapsed time: {time() - s:.2f}s")
+# s = time()
+# model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
+# print(f"Elapsed time: {time() - s:.2f}s")
+
+# model.model = model_scripted
 
 # s = time()
 # model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
@@ -76,13 +85,13 @@ print(f"Elapsed time: {time() - s:.2f}s")
 #     print("Scripted fp32 Torch model works correctly!")
 
 
-# # Load the ONNX model
-# import onnx
-# import onnxruntime as ort
-# from onnxruntime.quantization import quantize_dynamic, QuantType, quantize_static
-# from onnxruntime.quantization.preprocess import quant_pre_process
+# Load the ONNX model
+import onnx
+import onnxruntime as ort
+from onnxruntime.quantization import quantize_dynamic, QuantType, quantize_static
+from onnxruntime.quantization.preprocess import quant_pre_process
 
-# from onnxruntime.tools.optimize_onnx_model import optimize_model
+from onnxruntime.tools.optimize_onnx_model import optimize_model
 
 
 # # export model.model.dec to ONNX
@@ -114,5 +123,94 @@ print(f"Elapsed time: {time() - s:.2f}s")
 
 # s = time()
 # onnx_o_output = ort_session.run(None, {"x.3": x_in, "g": g_in})[0]
+# print(f"fp32 Elapsed time: {time() - s:.2f}s")
+# assert np.allclose(onnx_o_output, gt_o_output, atol=1e-4)
+
+
+# Export model_scripted to ONNX
+# model_onnx_path = "model_scripted.onnx"
+# print(inputs.keys())
+
+# # print out input keys, dtypes and shapes
+# print(
+#     "torch model input name, dtype and shape: ",
+#     [
+#         (k, v.dtype, v.shape) if isinstance(v, torch.Tensor) else v
+#         for k, v in inputs.items()
+#     ],
+# )
+
+# torch.onnx.export(
+#     # model.model,
+#     model_scripted,
+#     # list(inputs.values()),
+#     inputs,
+#     model_onnx_path,
+#     input_names=list(inputs.keys()),
+#     output_names=["o", "attn", "y_mask", "other"],
+#     dynamic_axes={
+#         "x": {0: "batch", 1: "length"},
+#         "x_lengths": {0: "batch"},
+#         "sid": {0: "batch"},
+#         "tone": {0: "batch", 1: "length"},
+#         "language": {0: "batch", 1: "length"},
+#         "bert": {0: "batch", 2: "length"},
+#         "ja_bert": {0: "batch", 2: "length"},
+#     },
+#     # opset_version=17,
+# )
+
+# # torch.onnx.dynamo_export(
+# #     model_scripted,
+# #     # x=torch.zeros([1, 192, 299]),
+# #     # g=torch.zeros([1, 256, 1]),
+# #     **inputs,
+# #     export_options=torch.onnx.ExportOptions(dynamic_shapes=True),
+# # ).save(model_onnx_path)
+
+# # Load the ONNX model
+# onnx_model = onnx.load(model_onnx_path)
+# onnx.checker.check_model(onnx_model, full_check=True)
+
+# # Get the shape and examples of tensor inputs
+# # input_shapes = {}
+# # input_examples = {}
+# # for input in onnx_model.graph.input:
+# #     input_shapes[input.name] = [
+# #         dim.dim_value for dim in input.type.tensor_type.shape.dim
+# #     ]
+# #     input_examples[input.name] = torch.zeros(input_shapes[input.name])
+
+# # print("Model exported to ONNX successfully.")
+# # print("Input shapes:", input_shapes)
+# # print("Input examples:", input_examples)
+# print(
+#     "onnx model input name, dtype and shape: ",
+#     [
+#         (
+#             i.name,
+#             onnx.helper.tensor_dtype_to_np_dtype(i.type.tensor_type.elem_type),
+#             [d.dim_value for d in i.type.tensor_type.shape.dim],
+#         )
+#         for i in onnx_model.graph.input
+#     ],
+# )
+# onnx_inputs = {
+#     k: v.cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
+#     for k, v in inputs.items()
+# }
+# for k, v in onnx_inputs.items():
+#     print(k, v.dtype, v.shape)
+# # onnx_inputs["x"] = onnx_inputs["x"].astype(np.float64)
+# # onnx_inputs["x_lengths"] = onnx_inputs["x_lengths"].astype(np.float64)
+# # onnx_inputs["sid"] = onnx_inputs["sid"].astype(np.float64)
+# # onnx_inputs["tone"] = onnx_inputs["tone"].astype(np.float64)
+# # onnx_inputs["language"] = onnx_inputs["language"].astype(np.float64)
+# # onnx_inputs["g"] = onnx_inputs["g"].astype(np.float64)
+# ort_session = ort.InferenceSession(model_onnx_path)
+
+# print(onnx_inputs.keys())
+# s = time()
+# onnx_o_output = ort_session.run(None, onnx_inputs)
 # print(f"fp32 Elapsed time: {time() - s:.2f}s")
 # assert np.allclose(onnx_o_output, gt_o_output, atol=1e-4)
