@@ -26,13 +26,25 @@ model.tts_to_file(text, speaker_ids["EN-BR"], output_path, speed=speed)
 inputs = model.get_inputs(text, speaker_ids["EN-BR"], output_path, speed=speed)
 model_scripted = torch.jit.script(model.model, example_inputs=inputs)
 
+print(torch._dynamo.list_backends())
+model_compiled = torch.compile(
+    model_scripted, fullgraph=True, dynamic=True, backend="onnxrt"
+)
+
 outputs = model.get_outputs(inputs)
 
 outputs_scripted = model_scripted(**inputs)
+outputs_compiled = model_compiled(**inputs)
 
-model.model = model_scripted
-
+s = time()
 model.tts_to_file(text, speaker_ids["EN-BR"], output_path, speed=speed)
+print(f"Elapsed time: {time() - s:.2f}s")
+
+model.model = model_compiled
+
+s = time()
+model.tts_to_file(text, speaker_ids["EN-BR"], output_path, speed=speed)
+print(f"Elapsed time: {time() - s:.2f}s")
 
 # American accent
 # s = time()
