@@ -14,8 +14,6 @@ from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
 from melo.commons import init_weights, get_padding
 import melo.monotonic_align as monotonic_align
 
-import onnxruntime as ort
-
 
 class DurationDiscriminator(nn.Module):  # vits2
     def __init__(
@@ -912,9 +910,26 @@ class SynthesizerTrn(nn.Module):
             gin_channels=gin_channels,
         )
 
-        # self.dec_onnx = ort.InferenceSession(
-        #     "/Users/user/demo_1/tts-pg/TTS/model_dec.simplified.onnx"
-        # )
+        if self.use_onnx:
+            import onnxruntime as ort
+
+            print("exporting decoder/generator to onnx...")
+            onnx_path = "/tmp/model_dec.onnx"
+            torch.onnx.export(
+                self.dec,
+                (torch.zeros([1, 192, 299]), torch.zeros([1, 256, 1])),
+                "/tmp/model_dec.onnx",
+                input_names=["x", "g"],
+                output_names=["x"],
+                dynamic_axes={
+                    "x": {0: "batch", 2: "length"},
+                    "g": {0: "batch", 2: "length"},
+                },
+                opset_version=17,
+            )
+
+            self.dec_onnx = ort.InferenceSession(onnx_path)
+            self.dec_onnx_input_names = [i.name for i in self.dec_onnx.get_inputs()]
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -1058,7 +1073,6 @@ class SynthesizerTrn(nn.Module):
     ):
         # x, m_p, logs_p, x_mask = self.enc_p(x, x_lengths, tone, language, bert)
         # g = self.gst(y)
-        s = time()
         if g is None:
             if self.n_speakers > 0:
                 g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
@@ -1068,18 +1082,12 @@ class SynthesizerTrn(nn.Module):
             g_p = None
         else:
             g_p = g
-        # print("ref enc or emb_g time:", time() - s)
-        s = time()
         x, m_p, logs_p, x_mask = self.enc_p(
             x, x_lengths, tone, language, bert, ja_bert, g=g_p
         )
-        # print("enc_p time:", time() - s)
-        s = time()
         logw = self.sdp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w) * (
             sdp_ratio
         ) + self.dp(x, x_mask, g=g) * (1 - sdp_ratio)
-        # print("sdp and dp time:", time() - s)
-        s = time()
         w = torch.exp(logw) * x_mask * length_scale
 
         w_ceil = torch.ceil(w)
@@ -1098,20 +1106,17 @@ class SynthesizerTrn(nn.Module):
         )  # [b, t', t], [b, t, d] -> [b, d, t']
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * noise_scale
-        # print("ops time:", time() - s)
-        s = time()
         z = self.flow(z_p, y_mask, g=g, reverse=True)
-        # print("flow time:", time() - s)
-        # print(
-        #     f"x_in shape: {(z * y_mask)[:, :, :max_len].shape}, g_in shape: {g.shape}"
-        # )
-        s = time()
         if self.use_onnx:
-            pass
-            # print("Using onnx")
-            # x = (z * y_mask)[:, :, :max_len]
-            # o = self.dec_onnx.run(None, {"x.3": x.numpy(), "g": g.numpy()})[0]
-            # o = torch.tensor(o)
+            x = (z * y_mask)[:, :, :max_len]
+            o = self.dec_onnx.run(
+                None,
+                {
+                    self.dec_onnx_input_names[0]: x.numpy(),
+                    self.dec_onnx_input_names[1]: g.numpy(),
+                },
+            )[0]
+            o = torch.tensor(o)
         else:
             x = (z * y_mask)[:, :, :max_len]
             o = self.dec(x, g=g)
@@ -1122,10 +1127,6 @@ class SynthesizerTrn(nn.Module):
                     "o_out": o,
                 }
             )
-        # print("dec time:", time() - s)
-        # print(f"o shape: {o.shape}")
-        s = time()
-        # print('max/min of o:', o.max(), o.min())
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
     def voice_conversion(self, y, y_lengths, sid_src, sid_tgt, tau=1.0):
