@@ -61,6 +61,7 @@ class TTS(nn.Module):
             language, device, use_hf=use_hf, ckpt_path=ckpt_path
         )
         self.model.load_state_dict(checkpoint_dict["model"], strict=True)
+        self.model.load_onnx()
 
         language = language.split("_")[0]
         self.language = (
@@ -156,7 +157,6 @@ class TTS(nn.Module):
                     .numpy()
                 )
                 del x_tst, tones, lang_ids, bert, ja_bert, x_tst_lengths, speakers
-                #
             audio_list.append(audio)
         torch.cuda.empty_cache()
         audio = self.audio_numpy_concat(

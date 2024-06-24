@@ -909,27 +909,6 @@ class SynthesizerTrn(nn.Module):
             upsample_kernel_sizes,
             gin_channels=gin_channels,
         )
-
-        if self.use_onnx:
-            import onnxruntime as ort
-
-            print("exporting decoder/generator to onnx...")
-            onnx_path = "/tmp/model_dec.onnx"
-            torch.onnx.export(
-                self.dec,
-                (torch.zeros([1, 192, 299]), torch.zeros([1, 256, 1])),
-                "/tmp/model_dec.onnx",
-                input_names=["x", "g"],
-                output_names=["x"],
-                dynamic_axes={
-                    "x": {0: "batch", 2: "length"},
-                    "g": {0: "batch", 2: "length"},
-                },
-                opset_version=17,
-            )
-
-            self.dec_onnx = ort.InferenceSession(onnx_path)
-            self.dec_onnx_input_names = [i.name for i in self.dec_onnx.get_inputs()]
         self.enc_q = PosteriorEncoder(
             spec_channels,
             inter_channels,
@@ -975,6 +954,28 @@ class SynthesizerTrn(nn.Module):
                 spec_channels, gin_channels, layernorm=norm_refenc
             )
         self.use_vc = use_vc
+
+    def load_onnx(self):
+        if self.use_onnx:
+            import onnxruntime as ort
+
+            print("exporting decoder/generator to onnx...")
+            onnx_path = "/tmp/model_dec.onnx"
+            torch.onnx.export(
+                self.dec,
+                (torch.zeros([1, 192, 299]), torch.zeros([1, 256, 1])),
+                "/tmp/model_dec.onnx",
+                input_names=["x", "g"],
+                output_names=["x"],
+                dynamic_axes={
+                    "x": {0: "batch", 2: "length"},
+                    "g": {0: "batch", 2: "length"},
+                },
+                opset_version=17,
+            )
+
+            self.dec_onnx = ort.InferenceSession(onnx_path)
+            self.dec_onnx_input_names = [i.name for i in self.dec_onnx.get_inputs()]
 
     def forward(self, x, x_lengths, y, y_lengths, sid, tone, language, bert, ja_bert):
         if self.n_speakers > 0:
@@ -1120,6 +1121,11 @@ class SynthesizerTrn(nn.Module):
         else:
             x = (z * y_mask)[:, :, :max_len]
             o = self.dec(x, g=g)
+            # self.onnx_trace = {
+            #     "x": x,
+            #     "g": g,
+            #     "o": o,
+            # }
         return o, attn, y_mask, (z, z_p, m_p, logs_p)
 
     def voice_conversion(self, y, y_lengths, sid_src, sid_tgt, tau=1.0):

@@ -22,15 +22,15 @@ text = "It's a story that's been told in many different languages."
 model = TTS(language="EN", device=device, use_onnx=False)
 speaker_ids = model.hps.data.spk2id
 
-model_model_dec = torch.jit.script(
-    model.model.dec,
-    example_inputs=(torch.zeros([1, 192, 299]), torch.zeros([1, 256, 1])),
-)
+# model_model_dec = torch.jit.script(
+#     model.model.dec,
+#     example_inputs=(torch.zeros([1, 192, 299]), torch.zeros([1, 256, 1])),
+# )
 
 # print(torch._dynamo.list_backends())
 # model_compiled = torch.compile(
 #     model.model.dec,
-#     dynamic=False,
+#     dynamic=True,
 #     fullgraph=False,
 #     backend="onnxrt",
 # )
@@ -46,33 +46,25 @@ model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
 print(f"Elapsed time: {time() - s:.2f}s")
 
 
-model = TTS(language="EN", device=device, use_onnx=True)
+model2 = TTS(language="EN", device=device, use_onnx=True)
 s = time()
-model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
+model2.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
 print(f"Elapsed time: {time() - s:.2f}s")
 
 s = time()
-model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
+model2.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
 print(f"Elapsed time: {time() - s:.2f}s")
 
-# print(f"Type before script: {type(model.model.dec)}")
-# model.model.dec = torch.jit.script(
-#     model.model.dec,
-#     example_inputs=(torch.zeros([1, 192, 299]), torch.zeros([1, 256, 1])),
-# )
-# print(f"Type after script: {type(model.model.dec)}")
-
-# s = time()
-# model.tts_to_file(text, speaker_ids["EN-US"], output_path, speed=speed)
-# print(f"Elapsed time: {time() - s:.2f}s")
-
-# Path(output_path).unlink(missing_ok=True)
 
 # ground truth for dec
 # x_in = np.random.random([1, 192, 299]).astype(np.float32)
 # g_in = np.random.random([1, 256, 1]).astype(np.float32)
 # gt_o_output = model.model.dec(torch.tensor(x_in), torch.tensor(g_in)).detach().numpy()
 
+# x_in = model.model.onnx_trace["x"].numpy()
+# g_in = model.model.onnx_trace["g"].numpy()
+# gt_o_output = model.model.dec(torch.tensor(x_in), torch.tensor(g_in)).detach().numpy()
+# assert np.allclose(model.model.onnx_trace["o"].numpy(), gt_o_output, atol=1e-4)
 
 # with torch.no_grad():
 #     model_model_dec.eval()
@@ -180,17 +172,20 @@ print(f"Elapsed time: {time() - s:.2f}s")
 
 
 # onnx_model = onnx.load(model_fp32_path)
-# # # onnx.checker.check_model(onnx_model, full_check=True)
-# # # print(onnx_model.graph.input)
+# onnx.checker.check_model(onnx_model, full_check=True)
+# print(onnx_model.graph.input)
 
 # ort_session = ort.InferenceSession(model_fp32_path)
 
 # s = time()
 # onnx_o_output = ort_session.run(
-#     None, {onnx_model.graph.input[0].name: x_in, onnx_model.graph.input[1].name: g_in}
+#     None,
+#     {
+#         model2.model.dec_onnx_input_names[0]: x_in,
+#         model2.model.dec_onnx_input_names[1]: g_in,
+#     },
 # )[0]
 # print(f"fp32 Elapsed time: {time() - s:.2f}s")
-# assert np.allclose(onnx_o_output, gt_o_output, atol=1e-4)
 
 # print("ONNX model works correctly!")
 
