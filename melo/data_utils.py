@@ -62,7 +62,6 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         skipped = 0
         logger.info("Init dataset...")
         for item in tqdm(self.audiopaths_sid_text):
-            print(item)
             try:
                 _id, spk, language, text, phones, tone, word2ph = item
             except:
